@@ -494,7 +494,14 @@ export function installToolResultContextGuard(params: {
       ? await originalTransformContext.call(mutableAgent, messages, signal)
       : messages;
 
-    const sourceMessages = Array.isArray(transformed) ? transformed : messages;
+    const rawSource = Array.isArray(transformed) ? transformed : messages;
+
+    // [celia-patch] Filter gateway-injected UI cards + strip [celia_card] markers
+    // from Agent assistant text before the LLM call. Prevents the Agent from
+    // seeing its own injected UI cards and from mimicking the [celia_card] format
+    // in a self-reinforcing loop. See project-notes/CeliaApp/方案/chat-inject-卡片持久化.md.
+    const sourceMessages = filterCeliaInjectedMessages(rawSource);
+
     const contextMessages = toolResultsNeedTruncation({
       messages: sourceMessages,
       maxSingleToolResultChars,
@@ -566,4 +573,65 @@ export function installToolResultContextGuard(params: {
   return () => {
     mutableAgent.transformContext = originalTransformContext;
   };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// [celia-patch] — 2026-04, xingguo
+// Strip gateway-injected UI-card messages and `[celia_card]` markers before
+// the Agent reads context. Two effects:
+//   1. `chat.inject`-produced messages (provider=openclaw, model=gateway-injected)
+//      carry client-side UI cards (SpaceCardMini / file card / a2ui_inline).
+//      They are kept in transcript for history display, but should NOT enter
+//      the Agent context — otherwise the Agent tries to mimic their format.
+//   2. Once the Agent has mimicked `[celia_card]`, its own assistant reply
+//      carrying that marker is persisted in transcript and read back on the
+//      next run → self-reinforcing loop. Strip the marker (and everything
+//      after it) from Agent assistant text to break the loop.
+// See project-notes/CeliaApp/方案/chat-inject-卡片持久化.md for full context.
+// ──────────────────────────────────────────────────────────────────────────
+function filterCeliaInjectedMessages(messages: AgentMessage[]): AgentMessage[] {
+  const CELIA_CARD_MARKER = "[celia_card]";
+  const isGatewayInjected = (msg: AgentMessage): boolean => {
+    const m = msg as unknown as { role?: string; provider?: string; model?: string };
+    return m.role === "assistant" && m.provider === "openclaw" && m.model === "gateway-injected";
+  };
+
+  const result: AgentMessage[] = [];
+  for (const msg of messages) {
+    if (isGatewayInjected(msg)) {
+      continue;
+    } // drop gateway-injected entirely
+
+    const m = msg as unknown as { role?: string; content?: unknown };
+    if (m.role === "assistant" && Array.isArray(m.content)) {
+      const content = m.content as Array<{ type?: string; text?: string }>;
+      const hasCard = content.some(
+        (b) =>
+          b.type === "text" && typeof b.text === "string" && b.text.includes(CELIA_CARD_MARKER),
+      );
+      if (hasCard) {
+        const cleanedContent = content
+          .map((b) => {
+            if (
+              b.type === "text" &&
+              typeof b.text === "string" &&
+              b.text.includes(CELIA_CARD_MARKER)
+            ) {
+              const idx = b.text.indexOf(CELIA_CARD_MARKER);
+              const cleaned = b.text.substring(0, idx).trimEnd();
+              return cleaned ? { ...b, text: cleaned } : null;
+            }
+            return b;
+          })
+          .filter((b): b is { type?: string; text?: string } => b !== null);
+        if (cleanedContent.length === 0) {
+          continue;
+        } // drop message if only marker was there
+        result.push({ ...msg, content: cleanedContent } as AgentMessage);
+        continue;
+      }
+    }
+    result.push(msg);
+  }
+  return result;
 }
