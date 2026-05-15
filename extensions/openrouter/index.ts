@@ -25,10 +25,35 @@ const PROVIDER_ID = "openrouter";
 const OPENROUTER_DEFAULT_MAX_TOKENS = 8192;
 const OPENROUTER_CACHE_TTL_MODEL_PREFIXES = [
   "anthropic/",
+  "deepseek/",
   "moonshot/",
   "moonshotai/",
   "zai/",
 ] as const;
+
+const OPENROUTER_DEEPSEEK_V4_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const;
+
+const OPENROUTER_DEEPSEEK_V4_THINKING_PROFILE = {
+  levels: OPENROUTER_DEEPSEEK_V4_THINKING_LEVELS.map((id) => ({ id })),
+  defaultLevel: "high",
+} as const;
+
+function normalizeOpenRouterDeepSeekV4ModelId(modelId: string): string | undefined {
+  const parts = modelId.trim().toLowerCase().split("/");
+  return parts[parts.length - 1];
+}
+
+function isOpenRouterDeepSeekV4ModelId(modelId: string): boolean {
+  const normalized = normalizeOpenRouterDeepSeekV4ModelId(modelId);
+  return normalized === "deepseek-v4-flash" || normalized === "deepseek-v4-pro";
+}
 
 function normalizeOpenRouterResolvedModel<T extends ProviderRuntimeModel>(model: T): T | undefined {
   const normalizedBaseUrl = normalizeOpenRouterBaseUrl(model.baseUrl);
@@ -141,6 +166,10 @@ export default definePluginEntry({
       isModernModelRef: () => true,
       wrapStreamFn: wrapOpenRouterProviderStream,
       isCacheTtlEligible: (ctx) => isOpenRouterCacheTtlModel(ctx.modelId),
+      resolveThinkingProfile: ({ modelId }) =>
+        isOpenRouterDeepSeekV4ModelId(modelId)
+          ? OPENROUTER_DEEPSEEK_V4_THINKING_PROFILE
+          : undefined,
     });
     api.registerMediaUnderstandingProvider(openrouterMediaUnderstandingProvider);
   },
