@@ -22,6 +22,7 @@ import type {
 import type { ProviderRuntimeModel } from "../plugins/provider-runtime-model.types.js";
 import { resolveProviderTransportTurnStateWithPlugin } from "../plugins/provider-runtime.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./copilot-dynamic-headers.js";
+import { createDeepSeekTextFilter } from "./deepseek-text-filter.js";
 import { detectOpenAICompletionsCompat } from "./openai-completions-compat.js";
 import { flattenCompletionMessagesToStringContent } from "./openai-completions-string-content.js";
 import { resolveOpenAIReasoningEffortMap } from "./openai-reasoning-compat.js";
@@ -1036,6 +1037,9 @@ async function processOpenAICompletionsStream(
   const MAX_POST_TOOL_CALL_BUFFER_BYTES = 256_000;
   const MAX_TOOL_CALL_ARGUMENT_BUFFER_BYTES = 256_000;
   const compat = getCompat(model as OpenAIModeModel);
+  const deepSeekTextFilter = shouldFilterDeepSeekDsmlText(compat)
+    ? createDeepSeekTextFilter()
+    : null;
   let currentBlock:
     | { type: "text"; text: string }
     | { type: "thinking"; thinking: string; thinkingSignature?: string }
@@ -1150,6 +1154,24 @@ async function processOpenAICompletionsStream(
     flushPendingPostToolCallDeltas();
     appendTextDeltaInternal(text);
   };
+  const appendVisibleTextDelta = (text: string) => {
+    if (!text) {
+      return;
+    }
+    if (currentBlock?.type === "toolCall") {
+      queuePostToolCallDelta({ kind: "text", text });
+    } else {
+      appendTextDelta(text);
+    }
+  };
+  const flushDeepSeekTextFilter = () => {
+    if (!deepSeekTextFilter) {
+      return;
+    }
+    for (const event of deepSeekTextFilter.flush()) {
+      appendVisibleTextDelta(event);
+    }
+  };
   for await (const chunk of responseStream) {
     output.responseId ||= chunk.id;
     if (chunk.usage) {
@@ -1174,13 +1196,13 @@ async function processOpenAICompletionsStream(
       continue;
     }
     if (choice.delta.content) {
-      if (currentBlock?.type === "toolCall") {
-        queuePostToolCallDelta({ kind: "text", text: choice.delta.content });
-      } else {
-        appendTextDelta(choice.delta.content);
+      const filtered = deepSeekTextFilter?.push(choice.delta.content) ?? [choice.delta.content];
+      for (const part of filtered) {
+        appendVisibleTextDelta(part);
       }
       continue;
     }
+    flushDeepSeekTextFilter();
     const reasoningDeltas = getCompletionsReasoningDeltas(
       choice.delta as Record<string, unknown>,
       compat.visibleReasoningDetailTypes,
@@ -1251,6 +1273,7 @@ async function processOpenAICompletionsStream(
     }
     flushPendingPostToolCallDeltas();
   }
+  flushDeepSeekTextFilter();
   finishCurrentBlock();
   if (currentBlock?.type === "toolCall") {
     currentBlock = null;
@@ -1272,6 +1295,10 @@ type CompletionsReasoningDelta =
       kind: "text";
       text: string;
     };
+
+function shouldFilterDeepSeekDsmlText(compat: ReturnType<typeof getCompat>) {
+  return compat.thinkingFormat === "deepseek";
+}
 
 function getCompletionsReasoningDeltas(
   delta: Record<string, unknown>,

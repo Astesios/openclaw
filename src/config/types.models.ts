@@ -31,6 +31,7 @@ type SupportedOpenAICompatFields = Pick<
 
 type SupportedThinkingFormat =
   | NonNullable<OpenAICompletionsCompat["thinkingFormat"]>
+  | "deepseek"
   | "openrouter"
   | "qwen-chat-template";
 
