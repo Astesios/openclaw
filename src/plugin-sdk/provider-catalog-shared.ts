@@ -3,6 +3,7 @@
 // Keep provider-owned exports out of this subpath so plugin loaders can import it
 // without recursing through provider-specific facades.
 
+import { normalizeStaticProviderModelId } from "../agents/model-ref-shared.js";
 import { findNormalizedProviderKey } from "../agents/provider-id.js";
 import type { ModelDefinitionConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -139,4 +140,131 @@ export function applyProviderNativeStreamingUsageCompat(params: {
   })
     ? withStreamingUsageCompat(params.providerConfig)
     : params.providerConfig;
+}
+
+// Minimal manifest-catalog builder ported from upstream commits
+// 4a195b37d5 / fd484cf472. Unlike upstream we do not depend on
+// src/model-catalog/normalize.ts — we validate inline. Re-sync with
+// upstream when celia takes the full model-catalog subsystem.
+
+type ManifestCatalogTieredCost = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  range: readonly [number] | readonly [number, number];
+};
+
+type ManifestCatalogCost = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  tieredPricing?: readonly ManifestCatalogTieredCost[];
+};
+
+type ManifestCatalogModel = {
+  id: string;
+  name?: string;
+  api?: ModelDefinitionConfig["api"];
+  baseUrl?: string;
+  reasoning?: boolean;
+  input?: ReadonlyArray<"text" | "image" | "document">;
+  cost?: ManifestCatalogCost;
+  contextWindow?: number;
+  contextTokens?: number;
+  maxTokens?: number;
+  headers?: Record<string, string>;
+  compat?: ModelDefinitionConfig["compat"];
+};
+
+type ManifestCatalogProvider = {
+  baseUrl?: string;
+  api?: ModelDefinitionConfig["api"];
+  headers?: Record<string, string>;
+  models?: readonly ManifestCatalogModel[];
+};
+
+function cloneManifestCatalogTieredCost(
+  tier: ManifestCatalogTieredCost,
+): NonNullable<ModelDefinitionConfig["cost"]["tieredPricing"]>[number] {
+  return {
+    input: tier.input ?? 0,
+    output: tier.output ?? 0,
+    cacheRead: tier.cacheRead ?? 0,
+    cacheWrite: tier.cacheWrite ?? 0,
+    range: tier.range.length === 1 ? [tier.range[0]] : [tier.range[0], tier.range[1]],
+  };
+}
+
+function cloneManifestCatalogCost(cost: ManifestCatalogCost): ModelDefinitionConfig["cost"] {
+  return {
+    input: cost.input ?? 0,
+    output: cost.output ?? 0,
+    cacheRead: cost.cacheRead ?? 0,
+    cacheWrite: cost.cacheWrite ?? 0,
+    ...(cost.tieredPricing
+      ? { tieredPricing: cost.tieredPricing.map(cloneManifestCatalogTieredCost) }
+      : {}),
+  };
+}
+
+function buildManifestCatalogModelInput(
+  model: ManifestCatalogModel,
+): ModelDefinitionConfig["input"] {
+  if (model.input?.includes("document")) {
+    throw new Error(
+      `Manifest modelCatalog row ${model.id} uses unsupported runtime input document`,
+    );
+  }
+  return model.input?.filter((item): item is "text" | "image" => item !== "document") ?? ["text"];
+}
+
+function buildManifestCatalogModel(
+  providerId: string,
+  model: ManifestCatalogModel,
+): ModelDefinitionConfig {
+  if (model.contextWindow === undefined) {
+    throw new Error(`Manifest modelCatalog row ${model.id} is missing contextWindow`);
+  }
+  if (model.maxTokens === undefined) {
+    throw new Error(`Manifest modelCatalog row ${model.id} is missing maxTokens`);
+  }
+  const id = normalizeStaticProviderModelId(providerId, model.id);
+  return {
+    id,
+    name: model.name ?? id,
+    ...(model.api ? { api: model.api } : {}),
+    ...(model.baseUrl ? { baseUrl: model.baseUrl } : {}),
+    reasoning: model.reasoning ?? false,
+    input: buildManifestCatalogModelInput(model),
+    cost: cloneManifestCatalogCost(model.cost ?? {}),
+    contextWindow: model.contextWindow,
+    ...(model.contextTokens !== undefined ? { contextTokens: model.contextTokens } : {}),
+    maxTokens: model.maxTokens,
+    ...(model.headers ? { headers: { ...model.headers } } : {}),
+    ...(model.compat ? { compat: { ...model.compat } } : {}),
+  };
+}
+
+export function buildManifestModelProviderConfig(params: {
+  providerId: string;
+  catalog: unknown;
+}): ModelProviderConfig {
+  if (!params.catalog || typeof params.catalog !== "object") {
+    throw new Error(`Missing modelCatalog.providers.${params.providerId}`);
+  }
+  const catalog = params.catalog as ManifestCatalogProvider;
+  if (!catalog.baseUrl) {
+    throw new Error(`Missing modelCatalog.providers.${params.providerId}.baseUrl`);
+  }
+  if (!Array.isArray(catalog.models)) {
+    throw new Error(`Missing modelCatalog.providers.${params.providerId}.models`);
+  }
+  return {
+    baseUrl: catalog.baseUrl,
+    ...(catalog.api ? { api: catalog.api } : {}),
+    ...(catalog.headers ? { headers: { ...catalog.headers } } : {}),
+    models: catalog.models.map((model) => buildManifestCatalogModel(params.providerId, model)),
+  };
 }
