@@ -28,11 +28,20 @@ describe("deepseek provider plugin", () => {
     expect(catalogProvider.api).toBe("openai-completions");
     expect(catalogProvider.baseUrl).toBe("https://api.deepseek.com");
     expect(catalogProvider.models?.map((model) => model.id)).toEqual([
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
       "deepseek-chat",
       "deepseek-reasoner",
     ]);
     expect(
       catalogProvider.models?.find((model) => model.id === "deepseek-reasoner")?.reasoning,
+    ).toBe(true);
+    expect(
+      catalogProvider.models?.find((model) => model.id === "deepseek-v4-flash")?.reasoning,
+    ).toBe(true);
+    expect(
+      catalogProvider.models?.find((model) => model.id === "deepseek-v4-flash")?.compat
+        ?.supportsReasoningEffort,
     ).toBe(true);
   });
 
