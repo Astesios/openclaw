@@ -163,6 +163,7 @@
   "session-binding-runtime",
   "session-key-runtime",
   "session-store-runtime",
+  "session-transcript-runtime",
   "ssrf-dispatcher",
   "string-coerce-runtime",
   "group-access",

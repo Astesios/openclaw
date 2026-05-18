@@ -191,9 +191,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
       }
       if (requestSignal) {
         if (requestSignal.aborted) {
-          abortWith(requestSignal);
+          abortWith(requestSignal as AbortSignal);
         } else {
-          onRequestAbort = () => abortWith(requestSignal);
+          onRequestAbort = () => abortWith(requestSignal as AbortSignal);
           requestSignal.addEventListener("abort", onRequestAbort);
         }
       }
