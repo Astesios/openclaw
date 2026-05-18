@@ -8,6 +8,11 @@ type NodeSendFn = (sessionKey: string, event: string, payload: unknown) => void;
 const getNodeSend = (): NodeSendFn | undefined =>
   (globalThis as Record<PropertyKey, unknown>)[NODE_SEND_KEY] as NodeSendFn | undefined;
 
+// ctx.sessionKey 格式为 "agent:agentId:sessionId"（如 "agent:main:main"）
+// Node 客户端订阅时使用短 key（如 "main"），需要去掉 "agent:xxx:" 前缀
+const toNodeSessionKey = (sessionKey: string | undefined): string =>
+  sessionKey?.replace(/^agent:[^:]+:/, "") ?? "main";
+
 export default definePluginEntry({
   id: "celia-canvas",
   name: "Celia Canvas",
@@ -56,15 +61,14 @@ export default definePluginEntry({
           _toolCallId: string,
           params: { type: "start" | "done"; runId: string; title?: string; success?: boolean },
         ) {
-          const sessionKey = ctx.sessionKey;
           const nodeSend = getNodeSend();
-          if (nodeSend && sessionKey) {
+          if (nodeSend) {
             const command = params.type === "start" ? "canvas.live.start" : "canvas.live.done";
             const payload =
               params.type === "start"
                 ? { runId: params.runId, title: params.title ?? "任务进行中" }
                 : { runId: params.runId, success: params.success !== false };
-            nodeSend(sessionKey, command, payload);
+            nodeSend(toNodeSessionKey(ctx.sessionKey), command, payload);
           }
           return {
             content: [{ type: "text" as const, text: JSON.stringify({ ok: true }) }],
@@ -108,8 +112,8 @@ export default definePluginEntry({
           const cardJson = JSON.stringify({ type, ...payload });
 
           const nodeSend = getNodeSend();
-          if (nodeSend && sessionKey) {
-            nodeSend(sessionKey, "canvas.card.push", { cardJson });
+          if (nodeSend) {
+            nodeSend(toNodeSessionKey(sessionKey), "canvas.card.push", { cardJson });
           }
 
           if (sessionKey) {
