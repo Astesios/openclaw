@@ -25,6 +25,58 @@ export default definePluginEntry({
 
     api.registerTool(
       (ctx) => ({
+        name: "notify_live",
+        label: "实况窗通知",
+        description:
+          "通知 Celia 客户端显示或关闭实况窗。spawn subagent 前调 type=start，收到 announce 后调 type=done。",
+        parameters: {
+          type: "object",
+          properties: {
+            type: {
+              type: "string",
+              enum: ["start", "done"],
+              description: "start：弹出实况窗；done：关闭实况窗",
+            },
+            runId: {
+              type: "string",
+              description: "subagent 的 runId，用于匹配 start/done",
+            },
+            title: {
+              type: "string",
+              description: "实况窗标题，type=start 时必填",
+            },
+            success: {
+              type: "boolean",
+              description: "任务是否成功，type=done 时使用，默认 true",
+            },
+          },
+          required: ["type", "runId"],
+        },
+        async execute(
+          _toolCallId: string,
+          params: { type: "start" | "done"; runId: string; title?: string; success?: boolean },
+        ) {
+          const sessionKey = ctx.sessionKey;
+          const nodeSend = getNodeSend();
+          if (nodeSend && sessionKey) {
+            const command = params.type === "start" ? "canvas.live.start" : "canvas.live.done";
+            const payload =
+              params.type === "start"
+                ? { runId: params.runId, title: params.title ?? "任务进行中" }
+                : { runId: params.runId, success: params.success !== false };
+            nodeSend(sessionKey, command, payload);
+          }
+          return {
+            content: [{ type: "text" as const, text: JSON.stringify({ ok: true }) }],
+            details: { ok: true },
+          };
+        },
+      }),
+      { name: "notify_live" },
+    );
+
+    api.registerTool(
+      (ctx) => ({
         name: "push_card",
         label: "推送卡片",
         description:
