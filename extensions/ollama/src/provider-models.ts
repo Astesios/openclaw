@@ -211,6 +211,11 @@ export function isReasoningModelHeuristic(modelId: string): boolean {
   return /r1|reasoning|think|reason/i.test(modelId);
 }
 
+function isKnownOllamaCloudReasoningModel(modelId: string): boolean {
+  const normalized = modelId.trim().toLowerCase();
+  return /^deepseek-v4-(?:flash|pro):cloud$/.test(normalized);
+}
+
 export function buildOllamaModelDefinition(
   modelId: string,
   contextWindow?: number,
@@ -221,7 +226,7 @@ export function buildOllamaModelDefinition(
   return {
     id: modelId,
     name: modelId,
-    reasoning: isReasoningModelHeuristic(modelId),
+    reasoning: isKnownOllamaCloudReasoningModel(modelId) || isReasoningModelHeuristic(modelId),
     input,
     cost: OLLAMA_DEFAULT_COST,
     contextWindow: contextWindow ?? OLLAMA_DEFAULT_CONTEXT_WINDOW,

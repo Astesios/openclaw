@@ -4,6 +4,7 @@ import { streamSimple } from "@mariozechner/pi-ai";
 import type { SettingsManager } from "@mariozechner/pi-coding-agent";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { createDeepSeekV4OpenAICompatibleThinkingWrapper } from "../../plugin-sdk/provider-stream-shared.js";
 import {
   prepareProviderExtraParams as prepareProviderExtraParamsRuntime,
   wrapProviderStreamFn as wrapProviderStreamFnRuntime,
@@ -395,6 +396,12 @@ function applyPostPluginStreamWrappers(
   ctx.agent.streamFn = createOpenAIStringContentWrapper(ctx.agent.streamFn);
 
   if (!ctx.providerWrapperHandled) {
+    ctx.agent.streamFn = createDeepSeekV4OpenAICompatibleThinkingWrapper({
+      baseStreamFn: ctx.agent.streamFn,
+      thinkingLevel: ctx.thinkingLevel,
+      shouldPatchModel: isDeepSeekV4OpenAICompatibleModel,
+    });
+
     // Guard Google-family payloads against invalid negative thinking budgets
     // emitted by upstream model-ID heuristics for Gemini 3.1 variants.
     ctx.agent.streamFn = createGoogleThinkingPayloadWrapper(ctx.agent.streamFn, ctx.thinkingLevel);
@@ -440,6 +447,22 @@ function applyPostPluginStreamWrappers(
  *
  * @internal Exported for testing
  */
+function normalizeDeepSeekV4CandidateId(modelId: unknown): string | undefined {
+  if (typeof modelId !== "string") {
+    return undefined;
+  }
+  const withoutSuffix = modelId.trim().toLowerCase().split(":", 1)[0];
+  return withoutSuffix.split("/").pop();
+}
+
+function isDeepSeekV4OpenAICompatibleModel(model: Parameters<StreamFn>[0]): boolean {
+  const normalizedModelId = normalizeDeepSeekV4CandidateId(model.id);
+  return (
+    model.api === "openai-completions" &&
+    (normalizedModelId === "deepseek-v4-flash" || normalizedModelId === "deepseek-v4-pro")
+  );
+}
+
 export function applyExtraParamsToAgent(
   agent: { streamFn?: StreamFn },
   cfg: OpenClawConfig | undefined,

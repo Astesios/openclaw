@@ -376,11 +376,13 @@ function filterCeliaInjectedMessages(messages: AgentMessage[]): AgentMessage[] {
     return m.role === "assistant" && m.provider === "openclaw" && m.model === "gateway-injected";
   };
 
+  let mutated = false;
   const result: AgentMessage[] = [];
   for (const msg of messages) {
     if (isGatewayInjected(msg)) {
+      mutated = true;
       continue;
-    } // drop gateway-injected entirely
+    }
 
     const m = msg as unknown as { role?: string; content?: unknown };
     if (m.role === "assistant" && Array.isArray(m.content)) {
@@ -390,28 +392,31 @@ function filterCeliaInjectedMessages(messages: AgentMessage[]): AgentMessage[] {
           b.type === "text" && typeof b.text === "string" && b.text.includes(CELIA_CARD_MARKER),
       );
       if (hasCard) {
-        const cleanedContent = content
-          .map((b) => {
-            if (
-              b.type === "text" &&
-              typeof b.text === "string" &&
-              b.text.includes(CELIA_CARD_MARKER)
-            ) {
-              const idx = b.text.indexOf(CELIA_CARD_MARKER);
-              const cleaned = b.text.substring(0, idx).trimEnd();
-              return cleaned ? { ...b, text: cleaned } : null;
+        mutated = true;
+        const cleanedContent: Array<{ type?: string; text?: string }> = [];
+        for (const b of content) {
+          if (
+            b.type === "text" &&
+            typeof b.text === "string" &&
+            b.text.includes(CELIA_CARD_MARKER)
+          ) {
+            const idx = b.text.indexOf(CELIA_CARD_MARKER);
+            const cleaned = b.text.substring(0, idx).trimEnd();
+            if (cleaned) {
+              cleanedContent.push({ ...b, text: cleaned });
             }
-            return b;
-          })
-          .filter((b): b is { type?: string; text?: string } => b !== null);
+            continue;
+          }
+          cleanedContent.push(b);
+        }
         if (cleanedContent.length === 0) {
           continue;
-        } // drop message if only marker was there
+        }
         result.push({ ...msg, content: cleanedContent } as AgentMessage);
         continue;
       }
     }
     result.push(msg);
   }
-  return result;
+  return mutated ? result : messages;
 }
