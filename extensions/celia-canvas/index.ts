@@ -84,21 +84,30 @@ export default definePluginEntry({
         name: "push_card",
         label: "推送卡片",
         description:
-          "推送结构化卡片到 Celia 客户端。支持空间/文件卡片（resource_card）、酒店/航班/景点模板卡片。" +
-          "同时持久化到会话记录以便历史重载。",
+          "推送结构化卡片到 Celia 客户端（同时持久化到会话记录以便历史重载）。" +
+          "Agent 推卡片必须调本工具，不要在 assistant text 中写 [celia_card] 标记（已弃用）。",
         parameters: {
           type: "object",
           properties: {
             type: {
               type: "string",
               description:
-                "卡片类型：resource_card | hotel_card | flight_card | scenic_card | poi_card",
+                "卡片类型：" +
+                "space_card（任务空间，含 phase 字段） | " +
+                "resource_card（通用资源/文件） | " +
+                "hotel_card | flight_card | scenic_card | poi_card（模板卡片）",
             },
             payload: {
               type: "object",
               description:
-                "卡片业务数据。resource_card 示例：{resourceType, id, title, subtitle?, thumbnail?, filePath?, action?}；" +
-                "模板卡片示例：{summaryText?, items:[...]}",
+                "卡片业务数据，按 type 不同字段不同：\n" +
+                "- space_card: { phase: 'suggest'|'created', suggestionId, name, " +
+                "spaceId?(created必填), subtitle?, tags?, moveFromTemp?, reason? }。" +
+                "phase=suggest 时 suggestionId 必填；phase=created 时 spaceId 必填，suggestionId 选填" +
+                "（带上则客户端自动合并到原 suggest 卡）。\n" +
+                "- resource_card: { resourceType, id, title, subtitle?, thumbnail?, filePath?, action? }。" +
+                "新文件用 action:'create' 或省略；更新已有文件才用 action:'update'。\n" +
+                "- 模板卡片: { summaryText?, items:[...] }",
             },
           },
           required: ["type", "payload"],
