@@ -1,0 +1,18 @@
+{
+  "name": "@openclaw/skill-discovery",
+  "version": "2026.5.13-beta.1",
+  "private": true,
+  "description": "Discover, verify, install, and live-update skills from ClawHub via natural-language triggers.",
+  "type": "module",
+  "dependencies": {
+    "typebox": "1.1.38"
+  },
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

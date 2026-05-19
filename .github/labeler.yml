@@ -377,3 +377,7 @@
   - changed-files:
       - any-glob-to-any-file:
           - "extensions/fal/**"
+"extensions: skill-discovery":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/skill-discovery/**"

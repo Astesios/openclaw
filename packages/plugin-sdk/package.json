@@ -44,6 +44,10 @@
       "types": "./dist/src/plugin-sdk/channel-streaming.d.ts",
       "default": "./src/channel-streaming.ts"
     },
+    "./clawhub-skills": {
+      "types": "./dist/src/plugin-sdk/clawhub-skills.d.ts",
+      "default": "./src/clawhub-skills.ts"
+    },
     "./cli-runtime": {
       "types": "./dist/src/plugin-sdk/cli-runtime.d.ts",
       "default": "./src/cli-runtime.ts"

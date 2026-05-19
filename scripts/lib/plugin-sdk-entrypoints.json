@@ -18,6 +18,7 @@
   "setup-runtime",
   "channel-setup",
   "channel-streaming",
+  "clawhub-skills",
   "setup-tools",
   "approval-auth-runtime",
   "approval-client-runtime",

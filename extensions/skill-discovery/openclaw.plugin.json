@@ -1,0 +1,34 @@
+{
+  "id": "skill-discovery",
+  "activation": {
+    "onStartup": true
+  },
+  "name": "Skill Discovery",
+  "description": "Detects capability gaps in conversation and runs the full skill lifecycle: find on ClawHub → security check → install → list → live update. Broadcasts lifecycle events so UI clients can visualize each stage.",
+  "contracts": {
+    "tools": ["find_skill", "install_skill"]
+  },
+  "uiHints": {
+    "enabled": {
+      "label": "Enabled",
+      "help": "Allow the model to discover and install new skills from ClawHub during chat."
+    },
+    "autoInstall": {
+      "label": "Auto Install",
+      "help": "Install matched skills automatically after security check passes. Off = require operator approval."
+    },
+    "broadcastEvents": {
+      "label": "Broadcast Lifecycle Events",
+      "help": "Emit plugin.skill.lifecycle.* WebSocket events so UI clients can visualize each stage."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": true },
+      "autoInstall": { "type": "boolean", "default": false },
+      "broadcastEvents": { "type": "boolean", "default": true }
+    }
+  }
+}
