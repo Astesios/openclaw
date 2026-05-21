@@ -1,0 +1,115 @@
+<!--
+  ═══════════════════════════════════════════════════════════════════
+  完整 day section 范例（minimalist 风格）
+
+  这是一个真实可读的范例，**Agent 生成路书时模仿这个结构**：
+  - timeline-item / transit-next / 卡片 / 地图块的相对顺序
+  - 每个元素的 class 命名
+  - transit-next 决策（前两项加，最后一项不加）
+  - 地图块由 render-map.mjs 脚本输出（不要自己写 JS）
+
+  其他风格（elegant / scrapbook / dynamic）外观不同，但**结构相同**——
+  按 references/style-{风格}.md 替换颜色/字体/装饰即可。
+  ═══════════════════════════════════════════════════════════════════
+-->
+<section class="day-section" id="day-1">
+
+  <!-- ───────── Day 头部 ───────── -->
+  <div class="day-header">
+    <p class="day-num">DAY 01</p>
+    <h2 class="day-title">抵达大理 · 洱海初见</h2>
+  </div>
+
+  <!-- ───────── Timeline 第 1 项（不同地点 → 加 transit-next）───────── -->
+  <div class="timeline-item">
+    <span class="timeline-time">09:55</span>
+    <div class="timeline-content">
+      <h3>抵达大理机场</h3>
+      <p>结束航程，第一缕高原阳光迎面而来。</p>
+
+      <!-- 到下一站的交通过渡 -->
+      <div class="transit-next" onclick="CeliaBridge.invoke('map.navigate', {name: '龙龛码头', lat: 25.69, lng: 100.21})">
+        <span>🚗 专车前往龙龛码头 · 约 30min</span>
+        <span class="transit-arrow">›</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── Timeline 第 2 项（含 POI 卡片 + transit-next）───────── -->
+  <div class="timeline-item">
+    <span class="timeline-time">11:00</span>
+    <div class="timeline-content">
+      <h3>龙龛码头</h3>
+      <p>站在湖畔看红杉林倒影，安静的一面洱海。</p>
+
+      <!-- POI 卡片（来自 FlyAI search-poi 数据）-->
+      <!-- 链接 MUST 用 CeliaBridge.invoke('surface.open', { url })，禁止 target="_blank" -->
+      <div class="card poi-card">
+        <img src="https://images.pexels.com/photos/PLACEHOLDER/dragon-niche.jpeg" loading="lazy">
+        <h3>龙龛码头</h3>
+        <div class="card-meta">⭐ 4.6 · 免费</div>
+        <a href="javascript:void(0)" class="detail-btn"
+           onclick="CeliaBridge.invoke('surface.open', { url: 'https://detail.feizhu.com/PLACEHOLDER' })">查看详情</a>
+      </div>
+
+      <!-- 到下一站的交通过渡 -->
+      <div class="transit-next">
+        <span>🚶 步行至古城 · 约 8min</span>
+        <span class="transit-arrow">›</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── Timeline 第 3 项（当天最后一项 → 不加 transit-next）───────── -->
+  <div class="timeline-item">
+    <span class="timeline-time">12:30</span>
+    <div class="timeline-content">
+      <h3>大理古城午餐</h3>
+      <p>白族风味菌子火锅，搭配冰梅子汁。</p>
+
+      <!-- 注意：当 day 最后一项，无下一站，不加 transit-next -->
+    </div>
+  </div>
+
+  <!--
+    ═════════════════════════════════════════════════════════════
+    当 day 地图块 — 由 render-map.mjs 脚本生成，Agent 不要手写 JS：
+      node ~/.openclaw/workspace/skills/lushu/scripts/render-map.mjs \
+        --mode day --day 1 \
+        --stops '[{"name":"大理机场","lnglat":[100.32,25.65]},
+                 {"name":"龙龛码头","lnglat":[100.21,25.69]},
+                 {"name":"大理古城","lnglat":[100.16,25.69]}]' \
+        --style minimalist
+    ═════════════════════════════════════════════════════════════
+  -->
+  <div class="map-wrap" id="map-wrap-day1">
+    <div id="map-day1" class="map-container"></div>
+    <button class="map-focus-btn" type="button">激活地图</button>
+  </div>
+  <script>
+    window.createLushuMap('map-day1', [
+      { "name": "大理机场", "lnglat": [100.32, 25.65] },
+      { "name": "龙龛码头", "lnglat": [100.21, 25.69] },
+      { "name": "大理古城", "lnglat": [100.16, 25.69] }
+    ], 'map-wrap-day1');
+  </script>
+
+</section>
+
+<!--
+  ═══════════════════════════════════════════════════════════════════
+  关键观察点（Agent 模仿时确认）：
+
+  ✓ section.day-section + id="day-N"（id 用连字符 day-1 / day-2，不是 day1）
+  ✓ class="day-section" 默认 display:none，第一个加 .active 显示
+  ✓ timeline-item 顺序 = 时间顺序
+  ✓ transit-next 紧跟 timeline-content 内末尾
+  ✓ 当 day 最后一项不加 transit-next（无下一站）
+  ✓ 同地点连续段（如同一酒店 morning/afternoon/evening）也不加
+  ✓ map-wrap 在所有 timeline-item 之后，section 内
+  ✓ 地图 script 调 window.createLushuMap，参数 = [id, stops 数组, wrapId]
+  ✓ stops JSON：{ name, lnglat: [经度, 纬度] }
+  ✓ 图片全部 https:// 开头，无 images/ 本地路径
+  ✓ FlyAI 数据卡片的链接用 onclick="CeliaBridge.invoke('surface.open', ...)"，禁止 target="_blank"
+  ═══════════════════════════════════════════════════════════════════
+-->

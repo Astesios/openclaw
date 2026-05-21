@@ -85,6 +85,25 @@ export const BUILD_ALL_STEPS = [
     },
   },
   {
+    label: "copy-lushu-plugin-assets",
+    kind: "node",
+    args: ["--import", "tsx", "scripts/copy-lushu-plugin-assets.ts"],
+    cache: {
+      inputs: [
+        "scripts/copy-lushu-plugin-assets.ts",
+        "scripts/lib/copy-assets.ts",
+        "extensions/lushu/scripts",
+        "extensions/lushu/assets/icons",
+        "extensions/lushu/assets/references",
+      ],
+      outputs: [
+        "dist/extensions/lushu/scripts",
+        "dist/extensions/lushu/assets/icons",
+        "dist/extensions/lushu/assets/references",
+      ],
+    },
+  },
+  {
     label: "write-build-info",
     kind: "node",
     args: ["--import", "tsx", "scripts/write-build-info.ts"],
@@ -112,6 +131,7 @@ export const BUILD_ALL_PROFILES = {
     "canvas-a2ui-copy",
     "copy-hook-metadata",
     "copy-export-html-templates",
+    "copy-lushu-plugin-assets",
     "write-build-info",
     "write-cli-startup-metadata",
     "write-cli-compat",

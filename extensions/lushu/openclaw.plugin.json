@@ -1,0 +1,25 @@
+{
+  "id": "lushu",
+  "name": "Lushu",
+  "description": "路书 plugin(纯 plugin 化)— 通过 before_prompt_build 注入触发规则,提供 6 个工具:fetch_images / query_flyai / render_map_block / render_icons / validate_lushu / get_lushu_spawn_prompt。替代原 lushu skill。",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "fetch_images",
+      "query_flyai",
+      "render_map_block",
+      "render_icons",
+      "validate_lushu",
+      "get_lushu_spawn_prompt"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean", "default": true }
+    }
+  }
+}

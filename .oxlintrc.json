@@ -51,6 +51,7 @@
     "dist/",
     "dist-runtime/",
     "docs/_layouts/",
+    "extensions/*/scripts/",
     "node_modules/",
     "patches/",
     "pnpm-lock.yaml",

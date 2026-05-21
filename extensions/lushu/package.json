@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/lushu",
+  "version": "2026.5.21",
+  "private": true,
+  "description": "Lushu plugin — wraps lushu skill scripts as plugin tools (fetch_images / query_flyai / render_map_block / render_icons / validate_lushu).",
+  "type": "module",
+  "devDependencies": {
+    "@openclaw/plugin-sdk": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

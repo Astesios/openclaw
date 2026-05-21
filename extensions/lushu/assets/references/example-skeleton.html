@@ -1,0 +1,196 @@
+<!--
+  ═══════════════════════════════════════════════════════════════════
+  完整 HTML 骨架范例（minimalist 风格简化版）
+
+  这是路书 HTML 的**外层骨架**——展示 head/body 各段的位置和顺序。
+  Day section 的内部结构看 example-day.html，本文件聚焦"哪里放什么"。
+
+  关键约束（Agent 第一次写就要按这个布局，避免事后用 fix-head 修）：
+
+  ① <head> 内分两段：
+     - 路书自身 CSS（手写，<style>...</style>）
+     - render-map.mjs --mode head 输出（**在 </style> 之后、</head> 之前**，完整粘贴不要拆）
+
+  ② <body> 内顺序：top-cover → hero → tabs-nav → day-section ×N → footer
+
+  ③ </body> 前的 <script>：
+     - CeliaBridge 实现（**照抄 references/celia-bridge.md，禁止自己编**）
+     - showDay 切 tab
+     - IntersectionObserver（hero 出可见区切 top-cover.show）
+     - scrollTo 800ms polling（修 demo-app-c WebView 自动滚到 hero 底部）
+  ═══════════════════════════════════════════════════════════════════
+-->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>路书标题</title>
+
+    <!-- Google Fonts（按风格选）-->
+    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+
+    <!-- 路书自身 CSS（手写）-->
+    <style>
+        :root {
+            --bg: #FAF9F8;
+            --primary: #111111;
+            --secondary: #A69F95;
+            --text: #4A4A4A;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; }
+
+        /* 顶部遮罩 — fixed 0-100px，hero 滚出后 fade-in */
+        .top-cover {
+            position: fixed; top: 0; left: 0; right: 0; height: 100px;
+            background: var(--bg); z-index: 99; pointer-events: none;
+            opacity: 0; transition: opacity 0.2s ease;
+        }
+        .top-cover.show { opacity: 1; }
+
+        /* Hero 全屏封面 */
+        .hero { height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .hero h1 { font-family: 'Playfair Display', serif; font-size: 48px; }
+
+        /* Sticky DAY tab — top:100px 让出 status bar + native title bar */
+        .tabs-nav {
+            position: sticky; top: 100px; z-index: 100;
+            background: var(--bg); /* MUST 不透明 */
+            display: flex; gap: 24px; padding: 16px 24px;
+            border-bottom: 1px solid var(--secondary);
+        }
+        .tab-btn {
+            background: none; border: none; cursor: pointer;
+            font-size: 14px; letter-spacing: 0.1em;
+            color: var(--secondary);
+        }
+        .tab-btn.active { color: var(--primary); }
+
+        /* day-section — 切 tab scrollIntoView 时让出 cover + nav 高度 */
+        .day-section {
+            display: none;
+            padding: 48px 24px;
+            scroll-margin-top: 150px; /* top-cover 100 + tabs-nav ~50 */
+        }
+        .day-section.active { display: block; }
+
+        /* 卡片样式（hotel/poi/flight 共享）*/
+        .card { /* ... */ }
+        .book-btn, .detail-btn { /* ... */ }
+
+        /* timeline / transit-next 等其他样式（按风格定）*/
+        .timeline-item { /* ... */ }
+        .transit-next { /* ... */ }
+    </style>
+
+    <!--
+        ═══════════════════════════════════════════════════════════════
+        ↓↓↓ render-map.mjs --mode head 输出粘到这里（必须在 </style> 之后, </head> 之前）↓↓↓
+        命令：node ~/.openclaw/workspace/skills/lushu/scripts/render-map.mjs --mode head --style minimalist
+        包含：_AMapSecurityConfig + enableMapFocus + createLushuMap + 高德 SDK + map CSS
+        粘错位置（如塞进 <style> 内 / 漏到 </body> 之前）会被 validate-lushu.sh check 7/8 抓到
+        ═══════════════════════════════════════════════════════════════
+    -->
+    [HERE: render-map.mjs --mode head 输出]
+
+</head>
+<body>
+    <!-- 顶部遮罩（紧跟 <body>，hero 之前）-->
+    <div class="top-cover"></div>
+
+    <!-- Hero 封面 -->
+    <header class="hero">
+        <h1>路书标题</h1>
+    </header>
+
+    <!-- DAY 切换 tab —— sticky 在 100px -->
+    <nav class="tabs-nav">
+        <button class="tab-btn active" onclick="showDay(1)">DAY 1</button>
+        <button class="tab-btn" onclick="showDay(2)">DAY 2</button>
+        <!-- ... -->
+    </nav>
+
+    <!-- Day sections（内部结构见 example-day.html）-->
+    <section class="day-section active" id="day-1">
+        <!-- timeline-item / 卡片 / map-wrap 等内容 -->
+        <!-- map-wrap 由 render-map.mjs --mode day --day 1 ... 生成 -->
+    </section>
+
+    <section class="day-section" id="day-2">
+        <!-- ... -->
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <p>Enjoy your trip with OpenClaw</p>
+    </footer>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         </body> 前的 <script>：bridge + tab + 顶部遮罩 + scroll 修复
+         ═══════════════════════════════════════════════════════════════ -->
+    <script>
+        // CeliaBridge —— **MUST 照抄 references/celia-bridge.md**
+        // 禁止改成 postMessage / fetch / location.href / console.log 占位
+        // 这些都不会到 Android 原生层（CeliaApp 是 addJavascriptInterface 注册的）
+        window.CeliaBridge = {
+            invoke: function(capability, params) {
+                if (window.CeliaApp && window.CeliaApp.invoke) {
+                    window.CeliaApp.invoke(JSON.stringify({
+                        capability: capability,
+                        params: params || {}
+                    }));
+                }
+            }
+        };
+
+        // showDay —— 切 tab + scrollIntoView，靠 .day-section { scroll-margin-top } 让出 sticky 高度
+        function showDay(n) {
+            document.querySelectorAll('.day-section').forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            var section = document.getElementById('day-' + n);
+            section.classList.add('active');
+            document.querySelectorAll('.tab-btn')[n-1].classList.add('active');
+            requestAnimationFrame(function() {
+                section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+
+        // demo-app-c WebView 加载后会自动滚到 hero 底部，需 800ms polling 强制回顶
+        if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+        (function() {
+            var startT = Date.now();
+            var iv = setInterval(function() {
+                window.scrollTo(0, 0);
+                if (Date.now() - startT > 800) clearInterval(iv);
+            }, 50);
+        })();
+
+        // 顶部遮罩切换 —— hero 离开 viewport "可见区"（100px 以下）时显示
+        // rootMargin -100px 把顶部 cover 区从判定剔除，避免 cover 不亮、hero 漏出
+        (function() {
+            var hero = document.querySelector('.hero');
+            var cover = document.querySelector('.top-cover');
+            if (!hero || !cover || typeof IntersectionObserver === 'undefined') return;
+            new IntersectionObserver(function(entries) {
+                cover.classList.toggle('show', !entries[0].isIntersecting);
+            }, { threshold: 0, rootMargin: '-100px 0px 0px 0px' }).observe(hero);
+        })();
+    </script>
+</body>
+</html>
+
+<!--
+  ═══════════════════════════════════════════════════════════════════
+  Agent 自检清单：
+
+  ✓ render-map.mjs --mode head 输出在 </style> 之后、</head> 之前（不在 body 末尾）
+  ✓ CeliaBridge 实现调 window.CeliaApp.invoke(JSON.stringify(...))，**不是** postMessage 或其他
+  ✓ <body> 顺序：top-cover → hero → tabs-nav → day-section → footer
+  ✓ scrollTo polling + IntersectionObserver + showDay 三块 JS 都在
+  ✓ .top-cover 背景不透明、tabs-nav 背景不透明（rgba alpha < 1 会透出下层）
+  ✓ .day-section 有 scroll-margin-top: 150px
+
+  跑 validate-lushu.sh，10 项 check 全部 PASS 才告知用户完成。
+  ═══════════════════════════════════════════════════════════════════
+-->
