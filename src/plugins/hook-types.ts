@@ -179,6 +179,13 @@ export type PluginHookLlmOutputEvent = {
   model: string;
   assistantTexts: string[];
   lastAssistant?: unknown;
+  /**
+   * 本次 attempt 内所有 assistant 消息的 content block 按物理顺序拼接（含 text 与 toolCall）。
+   * lastAssistant 只含最后一条消息——当一个 attempt 因工具调用被拆成多条 assistant 消息时
+   * （如 text+push_card / text+push_card / text），lastAssistant 会丢掉前面带 toolCall 的消息。
+   * 需要按「text→tool」物理顺序配对的消费者（如 celia-canvas 锚点绑定）应优先用此字段。
+   */
+  attemptAssistantContent?: unknown[];
   usage?: {
     input?: number;
     output?: number;

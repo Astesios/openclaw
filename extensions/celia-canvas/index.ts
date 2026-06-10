@@ -32,6 +32,19 @@ const stagedCardsByToolCallId = new Map<string, StagedCard>();
 // 按 sessionKey 索引：orphan 队列，处理跨 turn 无对应 text block 的兜底场景
 const orphanedCardsBySession = new Map<string, StagedCard[]>();
 
+// ── 跨 attempt 累积锚点（修复「做事文本→卡→建空间文本→卡」失序）──
+//
+// llm_output 每个 attempt 触发一次、只带本 attempt 的 content。若每个 attempt 都从
+// anchor=0 重数，而客户端 currentTurnAiTextIds 是整轮累积下标，跨 message 的第二段文本
+// 对应的卡会被错绑到第一段文本前面。
+//
+// 修复：anchor 在整轮内累积。base = 本轮此 attempt 之前已发出的 AI text 气泡数，
+// 本 attempt 的文本从 base 起继续数。客户端按 onUserMessage 重置累积下标，服务端按
+// runId 变化（= 用户新消息开启的新一轮 agent run，params.runId 整轮稳定）重置 base，
+// 两边边界对齐。
+const textAnchorBaseBySession = new Map<string, number>();
+const lastRunIdBySession = new Map<string, string>();
+
 function hasNonEmptyText(block: unknown): block is { type: "text"; text: string } {
   return (
     typeof block === "object" &&
@@ -181,7 +194,10 @@ export default definePluginEntry({
                 "（带上则客户端自动合并到原 suggest 卡）。\n" +
                 "- resource_card: { resourceType, id, title, subtitle?, thumbnail?, filePath?, action? }。" +
                 "新文件用 action:'create' 或省略；更新已有文件才用 action:'update'。\n" +
-                "- 模板卡片: { summaryText?, items:[...] }",
+                "- 模板卡片: { summaryText?, items:[...] }\n" +
+                "- caption?（所有卡通用，强烈推荐）：一句引导/总结文本。客户端会把它渲染成" +
+                "紧贴在这张卡正上方的一条文本气泡。caption 与卡是同一次推送的原子单元，" +
+                "顺序写死、不会错位——需要「文本+卡」成对出现时，用 caption 而不是单独发一段 assistant 文本。",
             },
           },
           required: ["type", "payload"],
@@ -227,8 +243,23 @@ export default definePluginEntry({
         api.logger.info("[celia-canvas] llm_output: no sessionKey in ctx, skipping");
         return;
       }
+      // runId 变化 = 新一轮用户消息 → 重置累积锚点基数（对齐客户端 onUserMessage 重置）。
+      // 放在 content 判空之前，保证新轮第一个 attempt 即使空 content 也能正确翻篇。
+      const runId = (event as { runId?: string }).runId;
+      if (runId && lastRunIdBySession.get(sessionKey) !== runId) {
+        textAnchorBaseBySession.set(sessionKey, 0);
+        lastRunIdBySession.set(sessionKey, runId);
+      }
+      // 优先用本 attempt 完整 content（含被拆成多条消息的 push_card toolCall），
+      // 否则退回 lastAssistant.content（只有最后一条消息，会漏掉 text+push_card 前置消息）。
+      const attemptContent = (event as { attemptAssistantContent?: unknown })
+        .attemptAssistantContent;
       const last = (event as { lastAssistant?: { content?: unknown } }).lastAssistant;
-      const content = Array.isArray(last?.content) ? (last.content as unknown[]) : [];
+      const content = Array.isArray(attemptContent)
+        ? (attemptContent as unknown[])
+        : Array.isArray(last?.content)
+          ? (last.content as unknown[])
+          : [];
       const blockSummary = content
         .map((b) => {
           const o = b as { type?: unknown; name?: unknown; text?: unknown };
@@ -249,8 +280,10 @@ export default definePluginEntry({
         return;
       }
 
-      // 按物理顺序扫描：text(非空) → anchor++；toolCall(push_card) → 绑到当前 anchor
-      let currentAnchor = -1;
+      // 按物理顺序扫描：text(非空) → anchor++；toolCall(push_card) → 绑到当前 anchor。
+      // currentAnchor 从本轮累积基数起算（不是每 attempt 从 0），跨 message 与客户端累积下标对齐。
+      const anchorBase = textAnchorBaseBySession.get(sessionKey) ?? 0;
+      let currentAnchor = anchorBase - 1;
       const groups: { anchor: number; cards: StagedCard[] }[] = [];
       for (const block of content) {
         if (hasNonEmptyText(block)) {
@@ -271,6 +304,10 @@ export default definePluginEntry({
           }
         }
       }
+
+      // 累积基数前进：本 attempt 新增了 groups.length 条 text 气泡（每个非空 text block 一组）。
+      // 即使本 attempt 没卡片，也要前进——客户端同样会为这些纯文本气泡推进 currentTurnAiTextIds。
+      textAnchorBaseBySession.set(sessionKey, anchorBase + groups.length);
 
       // 本 turn 之前 turn 留下的 orphan（如 Gemini 中间 toolUse turn 没 text）→
       // 在本 turn 有 anchor 时全部塞到第一个 anchor 前；没 anchor 就继续留着等下一个 turn
@@ -328,6 +365,8 @@ export default definePluginEntry({
         return;
       }
       orphanedCardsBySession.delete(sessionKey);
+      textAnchorBaseBySession.delete(sessionKey);
+      lastRunIdBySession.delete(sessionKey);
       for (const [id, staged] of stagedCardsByToolCallId) {
         if (staged.sessionKey === sessionKey) {
           stagedCardsByToolCallId.delete(id);

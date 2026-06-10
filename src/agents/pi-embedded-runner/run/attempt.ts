@@ -2576,6 +2576,16 @@ export async function runEmbeddedAttempt(
       }
 
       if (hookRunner?.hasHooks("llm_output")) {
+        // 本 attempt 的全部 assistant content（按物理顺序），含被拆成多条消息的 toolCall。
+        // lastAssistant 只有最后一条，会丢掉 text+push_card 这种前置消息——锚点配对需要完整序列。
+        const attemptAssistantContent = messagesSnapshot
+          .slice(Math.max(0, prePromptMessageCount))
+          .filter((m) => m.role === "assistant")
+          .flatMap((m) =>
+            Array.isArray((m as { content?: unknown }).content)
+              ? (m as { content: unknown[] }).content
+              : [],
+          );
         hookRunner
           .runLlmOutput(
             {
@@ -2585,6 +2595,7 @@ export async function runEmbeddedAttempt(
               model: params.modelId,
               assistantTexts,
               lastAssistant,
+              attemptAssistantContent,
               usage: attemptUsage,
             },
             {
