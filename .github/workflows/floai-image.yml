@@ -108,11 +108,15 @@ jobs:
           username: ${{ secrets.JCR_USER }}
           password: ${{ secrets.JCR_PASS }}
 
+      # pull/tag/push 普通单架构 manifest（JCR 不认 imagetools 推的 OCI index，会 502）
       - name: 推 amd64 → JCR
         if: env.JCR_REGISTRY != ''
         working-directory: /tmp/digests
         run: |
+          set -e
           TAG="${{ github.event.inputs.tag }}"
           JCR_IMG="${JCR_REGISTRY}/openclaw"
-          docker buildx imagetools create -t "${JCR_IMG}:${TAG}" "${IMAGE}@$(cat amd64)"
-          docker buildx imagetools inspect "${JCR_IMG}:${TAG}"
+          docker pull "${IMAGE}@$(cat amd64)"
+          docker tag  "${IMAGE}@$(cat amd64)" "${JCR_IMG}:${TAG}"
+          for n in 1 2 3; do docker push "${JCR_IMG}:${TAG}" && break; echo "重试 $n…"; sleep 8; done
+          echo "✓ JCR: ${JCR_IMG}:${TAG}"
