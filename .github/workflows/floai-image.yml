@@ -1,0 +1,98 @@
+name: floai · openclaw 多架构镜像
+
+# 手动触发：把 fork 当前分支（默认 floai）build 成 amd64+arm64 多架构镜像推 GHCR。
+# 各架构用原生 runner 分别 build（避开 QEMU 慢），最后合并成一个 manifest list。
+# 触发：Actions 页面点 Run，或 `gh workflow run floai-image.yml -f tag=floai`
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '镜像 tag（推到 ghcr.io/xingguo0127/openclaw:<tag>）'
+        required: true
+        default: floai
+
+env:
+  IMAGE: ghcr.io/xingguo0127/openclaw
+
+jobs:
+  # ── 每个架构在各自原生 runner 上 build，按 digest 推（不带 tag）──
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm   # public 仓免费 arm64 原生 runner
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      # 默认参数 build（OPENCLAW_EXTENSIONS 空、default variant），与本地基线镜像一致
+      - name: build + 推 digest（${{ matrix.arch }}）
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: 导出 digest
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.arch }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # ── 把两个架构的 digest 合并成一个多架构 tag ──
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: 合并成多架构 manifest
+        working-directory: /tmp/digests
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+            $(for f in *; do echo "${IMAGE}@$(cat "$f")"; done)
+
+      - name: 校验（应列出 linux/amd64 + linux/arm64）
+        run: docker buildx imagetools inspect "${IMAGE}:${{ github.event.inputs.tag }}"
