@@ -99,7 +99,9 @@ jobs:
       - name: 校验（应列出 linux/amd64 + linux/arm64）
         run: docker buildx imagetools inspect "${IMAGE}:${{ github.event.inputs.tag }}"
 
-      # ── 京东云 JCR：只推 amd64（prod box 用，单架构省存储 + 拉取快）──
+      # ── 京东云 JCR：推两个单架构 tag（jfe 网关不收多架构 manifest list，PUT 直接 500/502）──
+      #    :<tag>        = amd64 → prod box 内网拉
+      #    :<tag>-arm64  = arm64 → 设计师 Apple Silicon 原生拉（dev compose 按 uname -m 选）
       - name: 登录 JCR（京东云）
         if: env.JCR_REGISTRY != ''
         uses: docker/login-action@v3
@@ -108,15 +110,20 @@ jobs:
           username: ${{ secrets.JCR_USER }}
           password: ${{ secrets.JCR_PASS }}
 
-      # pull/tag/push 普通单架构 manifest（JCR 不认 imagetools 推的 OCI index，会 502）
-      - name: 推 amd64 → JCR
+      # 按 digest 拉单架构 manifest 重推（不跑镜像，故 arm64 在 amd64 runner 上也无需 QEMU）。
+      # 不合 manifest list：实测 JCR 对 Docker list(500) 与 OCI index(502) 的 PUT 都被网关拒。
+      - name: 推单架构 amd64 + arm64 → JCR
         if: env.JCR_REGISTRY != ''
         working-directory: /tmp/digests
         run: |
           set -e
           TAG="${{ github.event.inputs.tag }}"
           JCR_IMG="${JCR_REGISTRY}/openclaw"
-          docker pull "${IMAGE}@$(cat amd64)"
-          docker tag  "${IMAGE}@$(cat amd64)" "${JCR_IMG}:${TAG}"
-          for n in 1 2 3; do docker push "${JCR_IMG}:${TAG}" && break; echo "重试 $n…"; sleep 8; done
-          echo "✓ JCR: ${JCR_IMG}:${TAG}"
+          push() {  # $1=GHCR digest  $2=JCR tag
+            docker pull "${IMAGE}@$1"
+            docker tag  "${IMAGE}@$1" "${JCR_IMG}:$2"
+            for n in 1 2 3; do docker push "${JCR_IMG}:$2" && break; echo "重试 $n…"; sleep 8; done
+          }
+          push "$(cat amd64)" "${TAG}"
+          push "$(cat arm64)" "${TAG}-arm64"
+          echo "✓ JCR: ${JCR_IMG}:${TAG}(amd64) + ${JCR_IMG}:${TAG}-arm64(arm64)"
