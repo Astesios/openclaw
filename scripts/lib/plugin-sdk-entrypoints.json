@@ -1,6 +1,7 @@
 [
   "index",
   "core",
+  "celia-card-inject",
   "lmstudio",
   "lmstudio-runtime",
   "provider-setup",

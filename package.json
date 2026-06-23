@@ -193,6 +193,10 @@
       "types": "./dist/plugin-sdk/core.d.ts",
       "default": "./dist/plugin-sdk/core.js"
     },
+    "./plugin-sdk/celia-card-inject": {
+      "types": "./dist/plugin-sdk/celia-card-inject.d.ts",
+      "default": "./dist/plugin-sdk/celia-card-inject.js"
+    },
     "./plugin-sdk/lmstudio": {
       "types": "./dist/plugin-sdk/lmstudio.d.ts",
       "default": "./dist/plugin-sdk/lmstudio.js"

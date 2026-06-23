@@ -10,6 +10,19 @@ import { hasConnectedTalkNode } from "./server-talk-nodes.js";
 
 // Node session runtime owns connected node registry state, session event
 // subscriptions, and voice-wake fanout helpers for the gateway process.
+
+// Global key for plugins to access nodeSendToSession without bind_broadcaster warmup.
+const NODE_SEND_KEY = Symbol.for("openclaw.gateway.nodeSendToSession");
+
+export type NodeSendToSessionFn = (sessionKey: string, event: string, payload: unknown) => void;
+
+/** Returns the gateway-level nodeSendToSession singleton, available after gateway startup. */
+export function getGlobalNodeSendToSession(): NodeSendToSessionFn | undefined {
+  return (globalThis as Record<PropertyKey, unknown>)[NODE_SEND_KEY] as
+    | NodeSendToSessionFn
+    | undefined;
+}
+
 /** Creates node registry/subscription runtime state for a gateway server. */
 export function createGatewayNodeSessionRuntime(params: {
   broadcast: (event: string, payload: unknown, opts?: { dropIfSlow?: boolean }) => void;
@@ -30,6 +43,8 @@ export function createGatewayNodeSessionRuntime(params: {
   // explicit unsubscribes keep both node->session indexes in sync.
   const nodeSendToSession = (sessionKey: string, event: string, payload: unknown) =>
     nodeSubscriptions.sendToSession(sessionKey, event, payload, nodeSendEvent);
+  // Expose nodeSendToSession process-wide so plugins can reach it without bind_broadcaster.
+  (globalThis as Record<PropertyKey, unknown>)[NODE_SEND_KEY] = nodeSendToSession;
   const nodeSendToAllSubscribed = (event: string, payload: unknown) =>
     nodeSubscriptions.sendToAllSubscribed(event, payload, nodeSendEvent);
   const broadcastVoiceWakeChanged = (triggers: string[]) => {
