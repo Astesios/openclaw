@@ -76,6 +76,7 @@ type GoogleRealtimeTurnCoverage = "only-activity" | "all-input" | "audio-activit
 
 type GoogleRealtimeVoiceProviderConfig = {
   apiKey?: string;
+  baseUrl?: string;
   model?: string;
   voice?: string;
   temperature?: number;
@@ -225,6 +226,8 @@ function normalizeProviderConfig(
       value: raw?.apiKey ?? cfg?.models?.providers?.google?.apiKey,
       path: "plugins.entries.voice-call.config.realtime.providers.google.apiKey",
     }),
+    baseUrl:
+      trimToUndefined(raw?.baseUrl) ?? trimToUndefined(cfg?.models?.providers?.google?.baseUrl),
     model: trimToUndefined(raw?.model),
     voice: trimToUndefined(raw?.speakerVoice) ?? trimToUndefined(raw?.voice),
     temperature: asFiniteNumber(raw?.temperature),
@@ -471,6 +474,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       apiKey: this.config.apiKey,
       httpOptions: {
         apiVersion: this.config.apiVersion ?? GOOGLE_REALTIME_DEFAULT_API_VERSION,
+        ...(this.config.baseUrl ? { baseUrl: this.config.baseUrl } : {}),
       },
     });
 
