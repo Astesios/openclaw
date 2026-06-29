@@ -25,6 +25,7 @@ import {
   resolveSessionTranscriptResetArchiveCandidatesAsync,
 } from "./session-transcript-files.fs.js";
 import {
+  isGatewayInjectedAssistantRecord,
   readSessionTranscriptIndex,
   type IndexedTranscriptEntry,
 } from "./session-transcript-index.fs.js";
@@ -392,17 +393,65 @@ function selectBoundedActiveTailRecords(
     const entry = recordsByValue.get(node.entry);
     return entry ? [entry] : [];
   });
-  const firstActiveRecord = activeBranch[0];
+  const displayBranch = graftInjectedTailCards(entries, activeBranch);
+  const firstActiveRecord = displayBranch[0];
   const firstActiveIndex = firstActiveRecord ? entries.indexOf(firstActiveRecord) : -1;
   if (firstActiveIndex > 0) {
     for (let index = firstActiveIndex - 1; index >= 0; index -= 1) {
       const entry = entries[index];
       if (entry?.record.type === "compaction") {
-        return [entry, ...activeBranch];
+        return [entry, ...displayBranch];
       }
     }
   }
-  return activeBranch;
+  return displayBranch;
+}
+
+function readRecordStringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * Re-attach gateway-injected cards to the recent/tail active branch.
+ *
+ * Mirrors the index reader's display graft: push_card and other gateway-injected
+ * assistant rows are parked on side branches by the per-inject leaf control (so
+ * they stay out of model context) — directly off the active leaf for a multi-card
+ * step, or buried deep in a subagent/announce subtree for a route-book delivery.
+ * They are gateway-authored DISPLAY content and must render regardless of tree
+ * position, so we graft every gateway-injected assistant row not already on the
+ * active branch, in file (entries[]) order. Clients dedupe cards by stable id.
+ * Model context is unaffected (it uses the pruned leaf-controlled path).
+ */
+function graftInjectedTailCards(
+  entries: TailTranscriptRecord[],
+  activeBranch: TailTranscriptRecord[],
+): TailTranscriptRecord[] {
+  const activeIds = new Set<string>();
+  for (const entry of activeBranch) {
+    const id = readRecordStringField(entry.record, "id");
+    if (id) {
+      activeIds.add(id);
+    }
+  }
+  const keep = new Set<TailTranscriptRecord>(activeBranch);
+  let grafted = false;
+  for (const entry of entries) {
+    const id = readRecordStringField(entry.record, "id");
+    if (!id || activeIds.has(id)) {
+      continue;
+    }
+    if (!isGatewayInjectedAssistantRecord(entry.record)) {
+      continue;
+    }
+    keep.add(entry);
+    grafted = true;
+  }
+  if (!grafted) {
+    return activeBranch;
+  }
+  return entries.filter((entry) => keep.has(entry));
 }
 
 function readTranscriptRecords(filePath: string): TailTranscriptRecord[] {

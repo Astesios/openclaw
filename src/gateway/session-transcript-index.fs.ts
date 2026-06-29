@@ -254,6 +254,54 @@ function buildActiveTreeEntries(params: {
   return out.toReversed();
 }
 
+export function isGatewayInjectedAssistantRecord(record: unknown): boolean {
+  if (!record || typeof record !== "object") {
+    return false;
+  }
+  const message = (record as { message?: unknown }).message;
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  return (
+    (message as { role?: unknown }).role === "assistant" &&
+    (message as { model?: unknown }).model === "gateway-injected"
+  );
+}
+
+/**
+ * Active path for display, with gateway-injected cards grafted back in.
+ *
+ * push_card and other gateway-injected assistant rows get parked on side branches
+ * by the per-inject leaf control so they stay out of model context — sometimes
+ * directly off the active leaf (a multi-card plan step), sometimes buried deep in
+ * a subagent/announce subtree (a route-book delivery) separated from the active
+ * leaf by ordinary assistant/tool rows. They are gateway-authored DISPLAY content
+ * and must render regardless of tree position, so we graft every gateway-injected
+ * assistant row that is not already on the active path, ordered by file offset to
+ * preserve push order. Clients dedupe cards by stable id, so re-pushed cards
+ * collapse. Model context is unaffected: it reads the pruned active path via
+ * selectSessionTranscriptLeafControlledPath, not this index.
+ */
+function buildDisplayTreeEntries(params: {
+  activeRawEntries: IndexedRawEntry[];
+  rawEntries: IndexedRawEntry[];
+}): IndexedRawEntry[] {
+  const activeIds = new Set<string>();
+  for (const entry of params.activeRawEntries) {
+    if (entry.id) {
+      activeIds.add(entry.id);
+    }
+  }
+  const grafted = params.rawEntries.filter(
+    (entry) =>
+      entry.id && !activeIds.has(entry.id) && isGatewayInjectedAssistantRecord(entry.record),
+  );
+  if (grafted.length === 0) {
+    return params.activeRawEntries;
+  }
+  return [...params.activeRawEntries, ...grafted].sort((left, right) => left.offset - right.offset);
+}
+
 function toIndexedEntries(rawEntries: IndexedRawEntry[]): IndexedTranscriptEntry[] {
   const entries: IndexedTranscriptEntry[] = [];
   let seq = 0;
@@ -331,13 +379,20 @@ async function buildSessionTranscriptIndex(
   const activeRawEntries = tree.hasExplicitLeafUpdate
     ? buildActiveTreeEntries({ byId, leafId: tree.leafId })
     : rawEntries;
+  // Display view = active path + grafted gateway-injected side-branch cards.
+  // When there are no leaf controls the active path already equals rawEntries
+  // (file order), so it carries every card; only the leaf-controlled case needs
+  // the graft.
+  const displayRawEntries = tree.hasExplicitLeafUpdate
+    ? buildDisplayTreeEntries({ activeRawEntries, rawEntries })
+    : activeRawEntries;
   return {
     filePath,
     mtimeMs: stat.mtimeMs,
     size: stat.size,
     hasTreeEntries: tree.hasExplicitLeafUpdate,
     ...(tree.hasExplicitLeafUpdate ? { leafId: tree.leafId } : {}),
-    entries: toIndexedEntries(activeRawEntries),
+    entries: toIndexedEntries(displayRawEntries),
     allEntries: toIndexedEntries(rawEntries),
   };
 }
