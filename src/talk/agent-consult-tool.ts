@@ -38,7 +38,14 @@ export const REALTIME_VOICE_AGENT_CONSULT_TOOL: RealtimeVoiceTool = {
   type: "function",
   name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   description:
-    "Delegate the caller's request to the configured OpenClaw agent for normal tool-backed work, actions, context, memory, or reasoning before speaking.",
+    "Delegate the caller's request to the configured OpenClaw agent, then speak its result. " +
+    "You MUST call this (do NOT answer yourself) for: " +
+    "(1) querying tasks, spaces, plans, or any existing artifact's details; " +
+    "(2) making a plan, generating a route book / document / itinerary, or creating a space; " +
+    "(3) modifying, updating, redoing, or extending any existing plan / route book / space — " +
+    "INCLUDING ones you just created earlier in THIS conversation; never assume it is already done just because you finished it a moment ago; " +
+    "(4) answering the user's reply to a question OpenClaw asked (preferences, dates, numbers, confirmations). " +
+    "Only pure greetings or idle small talk may be answered directly without this tool.",
   parameters: {
     type: "object",
     properties: {
