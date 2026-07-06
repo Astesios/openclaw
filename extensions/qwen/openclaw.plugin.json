@@ -215,7 +215,8 @@
   },
   "contracts": {
     "mediaUnderstandingProviders": ["qwen"],
-    "videoGenerationProviders": ["qwen"]
+    "videoGenerationProviders": ["qwen"],
+    "realtimeVoiceProviders": ["qwen"]
   },
   "mediaUnderstandingProviderMetadata": {
     "qwen": {

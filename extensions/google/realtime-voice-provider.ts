@@ -1,5 +1,15 @@
 // Google provider module implements model/runtime integration.
 import { randomUUID } from "node:crypto";
+import { appendFileSync as _gdbgAppend } from "node:fs";
+// 【临时调试】确认 realtime WS 实际用的 baseUrl(直连 vs 代理)。用完删。
+function gdbg(tag: string, obj?: Record<string, unknown>): void {
+  try {
+    _gdbgAppend(
+      "/tmp/gemini-rt-debug.log",
+      `${new Date().toISOString()} ${tag} ${obj ? JSON.stringify(obj) : ""}\n`,
+    );
+  } catch {}
+}
 import type {
   ActivityHandling,
   Behavior,
@@ -103,6 +113,7 @@ type GoogleRealtimeLiveConfig = {
   voice?: string;
   temperature?: number;
   apiVersion?: string;
+  baseUrl?: string;
   prefixPaddingMs?: number;
   silenceDurationMs?: number;
   startSensitivity?: GoogleRealtimeSensitivity;
@@ -470,6 +481,11 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.audioStreamEnded = false;
     this.pendingFunctionNames.clear();
 
+    gdbg("connect", {
+      baseUrl: this.config.baseUrl ?? "(genai default = official)",
+      apiVersion: this.config.apiVersion ?? GOOGLE_REALTIME_DEFAULT_API_VERSION,
+      model: this.config.model ?? GOOGLE_REALTIME_DEFAULT_MODEL,
+    });
     const ai = createGoogleGenAI({
       apiKey: this.config.apiKey,
       httpOptions: {
@@ -801,6 +817,7 @@ class GoogleRealtimeVoiceBridge implements RealtimeVoiceBridge {
       GOOGLE_REALTIME_RECONNECT_MAX_DELAY_MS,
       GOOGLE_REALTIME_RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1),
     );
+    gdbg("close", { closeDetails, baseUrl: this.config.baseUrl ?? "(official)" });
     this.config.onError?.(
       new Error(
         `Google Live session closed unexpectedly (${closeDetails}); reconnecting ${attempt}/${GOOGLE_REALTIME_RECONNECT_MAX_ATTEMPTS} in ${delayMs}ms`,
@@ -957,6 +974,7 @@ export function buildGoogleRealtimeVoiceProvider(): RealtimeVoiceProviderPlugin 
         voice: config.voice,
         temperature: config.temperature,
         apiVersion: config.apiVersion,
+        baseUrl: config.baseUrl,
         prefixPaddingMs: config.prefixPaddingMs,
         silenceDurationMs: config.silenceDurationMs,
         startSensitivity: config.startSensitivity,
