@@ -191,9 +191,10 @@ export function buildRealtimeVoiceAgentConsultChatMessage(args: unknown): string
   ]
     .filter(Boolean)
     .join("\n\n");
-  // 通话态标记：realtime consult 经 chat.send 投给后端 agent，首行加 [voice_call]，让 AGENTS.md
-  // 通话态规则生效（口头收集、不弹 PlanMode/建议卡）——与 ASR→TTS 路径同一约定。
-  return `[voice_call]\n${body}`;
+  // 通话态标记：realtime consult 用 [realtime_call]（区别于 ASR→TTS 的 [voice_call]）。两者都触发
+  // AGENTS.md 通话态核心规则（口头收集、不弹交互卡）；[realtime_call] 额外走"结果简短/数据化/异步"
+  // 的附则 —— 因为 realtime 语音模型(qwen/gemini)会转述概括、不逐字念长内容。
+  return `[realtime_call]\n${body}`;
 }
 
 /** Build the delegated OpenClaw agent prompt for a live voice consult. */
@@ -217,9 +218,9 @@ export function buildRealtimeVoiceAgentConsultPrompt(params: {
     .join("\n");
 
   return [
-    // 通话态标记：realtime 也是语音通话,首行必须是 [voice_call],让后端 agent 的 AGENTS.md
-    // 通话态规则生效(口头收集、不弹 PlanMode/建议卡等交互卡)——与 ASR→TTS 路径同源。
-    "[voice_call]",
+    // 通话态标记：realtime 用 [realtime_call](区别于 ASR→TTS 的 [voice_call]),触发 AGENTS.md
+    // 通话态核心规则 + realtime 附则(结果简短/数据化/异步)。
+    "[realtime_call]",
     `Live voice request from the ${questionSourceLabel} during ${params.surface}.`,
     "Act as the configured OpenClaw agent on behalf of this user. Use available tools when the request asks you to do work.",
     "When finished, return only the concise result the realtime voice agent should speak back.",

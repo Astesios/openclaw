@@ -191,7 +191,7 @@ describe("realtime voice agent consult runtime", () => {
     expect(call.timeoutMs).toBe(10_000);
     expect(call.prompt).toBe(
       [
-        "[voice_call]",
+        "[realtime_call]",
         "Live voice request from the caller during a live phone call.",
         "Act as the configured OpenClaw agent on behalf of this user. Use available tools when the request asks you to do work.",
         "When finished, return only the concise result the realtime voice agent should speak back.",

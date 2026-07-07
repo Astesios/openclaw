@@ -329,7 +329,14 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           provider: resolution.provider,
           providerConfig: withRealtimeBrowserOverrides(resolution.providerConfig, launchOptions),
           instructions: buildRealtimeInstructions(realtimeConfig.instructions),
-          tools: [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL],
+          // force 模式下网关每轮强制转交,provider 无需(也不应)持有任何工具 —— 否则:
+          //   ①调 consult → 与强制转交双重进 DeepSeek(文本去重按串匹配,改写 vs 原话 → 去重失效);
+          //   ②调 control → app 侧把 control 重路由成 consult,同样双重。
+          // 故 force 时**不给任何工具**,qwen 只管念强制转交回来的结果;停/改这类由 DeepSeek 逐轮处理。
+          tools:
+            realtimeConfig.consultRouting === "force-agent-consult"
+              ? []
+              : [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL],
           model: launchOptions.model,
           sessionKey: normalizeOptionalString(params.sessionKey),
           voice: launchOptions.voice,

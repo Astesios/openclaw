@@ -20,7 +20,7 @@ describe("realtime voice agent consult tool", () => {
         context: "  PR #123 ",
         responseStyle: " concise ",
       }),
-    ).toBe("[voice_call]\nWhat changed?\n\nContext:\nPR #123\n\nSpoken style:\nconcise");
+    ).toBe("[realtime_call]\nWhat changed?\n\nContext:\nPR #123\n\nSpoken style:\nconcise");
   });
 
   it("requires a non-empty question", () => {
@@ -59,7 +59,7 @@ describe("realtime voice agent consult tool", () => {
 
     expect(prompt).toBe(
       [
-        "[voice_call]",
+        "[realtime_call]",
         "Live voice request from the participant during a private Google Meet.",
         "Act as the configured OpenClaw agent on behalf of this user. Use available tools when the request asks you to do work.",
         "When finished, return only the concise result the realtime voice agent should speak back.",

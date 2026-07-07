@@ -254,6 +254,12 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   sendUserMessage(text: string): void {
+    qwenDbg("sendUserMessage", {
+      len: text.length,
+      head: text.slice(0, 50),
+      responseActive: this.responseActive,
+      continuing: this.continuingToolCallIds.size,
+    });
     this.sendEvent({
       type: "conversation.item.create",
       item: {

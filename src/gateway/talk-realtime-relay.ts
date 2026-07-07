@@ -219,8 +219,9 @@ function buildForcedConsultCheckingPrompt(): string {
 
 function buildForcedConsultSpeechPrompt(text: string): string {
   return [
-    "OpenClaw finished checking. Speak this result naturally and concisely.",
-    "Do not mention tool calls, JSON, or internal routing.",
+    "OpenClaw produced the answer below. Read it back to the user faithfully and in full.",
+    "Keep every number, count, name, and list item EXACTLY as written — do NOT summarize, shorten, round, drop items, or change any count.",
+    "Do not invent or omit anything, and do not answer from your own memory. Do not mention tools, JSON, or internal routing. Speak only the answer itself.",
     "",
     text,
   ].join("\n");
