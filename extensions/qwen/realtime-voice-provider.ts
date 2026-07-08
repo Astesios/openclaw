@@ -3,22 +3,11 @@
 // drives us with PCM16/24kHz, but Qwen input is fixed at 16kHz, so sendAudio
 // downsamples 24k->16k on the uplink (output stays 24kHz and matches the relay).
 import { randomUUID } from "node:crypto";
-import { appendFileSync } from "node:fs";
 import {
   captureWsEvent,
   createDebugProxyWebSocketAgent,
   resolveDebugProxySettings,
 } from "openclaw/plugin-sdk/proxy-capture";
-
-// 【临时调试】qwen 两段式工具结果朗读排查:把关键状态追加到文件,便于事后核对。用完删。
-function qwenDbg(tag: string, obj?: Record<string, unknown>): void {
-  try {
-    appendFileSync(
-      "/tmp/qwen-rt-debug.log",
-      `${new Date().toISOString()} ${tag} ${obj ? JSON.stringify(obj) : ""}\n`,
-    );
-  } catch {}
-}
 import type {
   RealtimeVoiceAudioFormat,
   RealtimeVoiceBargeInOptions,
@@ -76,6 +65,10 @@ const QWEN_REALTIME_DEFAULT_WS_BASE = "wss://dashscope.aliyuncs.com/api-ws/v1/re
 const QWEN_REALTIME_RELAY_SAMPLE_RATE_HZ = 24000;
 const QWEN_REALTIME_DEFAULT_MIN_BARGE_IN_AUDIO_END_MS = 250;
 const QWEN_REALTIME_API_KEY_REQUIRED = "Qwen realtime voice requires a DashScope API key";
+// 投递工具结果时的本次响应专属 instructions:强制 qwen 读结果,防止异步结果回来时被中途插话
+// 搅乱、qwen 顺着最新上下文乱答或重复垫话。
+const DELIVER_TOOL_RESULT_INSTRUCTIONS =
+  "OpenClaw 刚刚返回了工具结果。请把这个结果自然地用中文口语读给用户;不要再说“请稍等/正在安排”之类的等待垫话,也不要顺着其它话题另起回答,直接讲结果内容。";
 
 type RealtimeEvent = {
   type: string;
@@ -212,6 +205,9 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private responseCreateInFlight = false;
   private responseCancelInFlight = false;
   private responseCreatePending = false;
+  // 本次 response.create 专属 instructions(投递工具结果时用,强制 qwen 读结果而非顺着最新上下文乱答);
+  // 沿 pending 链保留,flush 时仍生效。
+  private pendingResponseInstructions: string | undefined;
   private continuingToolCallIds = new Set<string>();
   private latestMediaTimestamp = 0;
   private lastAssistantItemId: string | null = null;
@@ -254,12 +250,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   sendUserMessage(text: string): void {
-    qwenDbg("sendUserMessage", {
-      len: text.length,
-      head: text.slice(0, 50),
-      responseActive: this.responseActive,
-      continuing: this.continuingToolCallIds.size,
-    });
     this.sendEvent({
       type: "conversation.item.create",
       item: {
@@ -284,16 +274,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
     options?: RealtimeVoiceToolResultOptions,
   ): void {
     const resultStr = JSON.stringify(result);
-    qwenDbg("submitToolResult", {
-      callId,
-      willContinue: options?.willContinue === true,
-      suppressResponse: options?.suppressResponse === true,
-      resultLen: resultStr.length,
-      resultHead: resultStr.slice(0, 80),
-      responseActive: this.responseActive,
-      responseCancelInFlight: this.responseCancelInFlight,
-      continuing: this.continuingToolCallIds.size,
-    });
     this.sendEvent({
       type: "conversation.item.create",
       item: {
@@ -308,10 +288,15 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
     }
     this.continuingToolCallIds.delete(callId);
     if (options?.suppressResponse === true) {
-      qwenDbg("submitToolResult.suppressed", { callId });
       return;
     }
-    this.requestResponseCreate();
+    // 异步结果回来时,若期间被插话搅乱、qwen 正忙别的响应 → 先取消,让"读结果"这轮接管。
+    if (this.responseActive && !this.responseCancelInFlight) {
+      this.sendEvent({ type: "response.cancel" }, "reason=deliver-tool-result");
+      this.responseCancelInFlight = true;
+    }
+    // 强制本轮读结果:带本次响应专属 instructions,钉死在"读工具结果"、不许再垫话/顺着最新上下文乱答。
+    this.requestResponseCreate(DELIVER_TOOL_RESULT_INSTRUCTIONS);
   }
 
   acknowledgeMark(): void {
@@ -654,7 +639,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
         return;
 
       case "response.created":
-        qwenDbg("event.response.created");
         this.responseActive = true;
         this.responseCreateInFlight = false;
         return;
@@ -679,11 +663,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
       }
 
       case "input_audio_buffer.speech_started":
-        qwenDbg("event.speech_started(VAD)", {
-          willBargeIn:
-            this.config.interruptResponseOnInputAudio ?? this.config.autoRespondToAudio ?? true,
-          responseActive: this.responseActive,
-        });
         if (this.config.interruptResponseOnInputAudio ?? this.config.autoRespondToAudio ?? true) {
           // barge-in:qwen 生成很快、常在用户开口前就 response.done,此时 app 仍在放排队的缓冲音频。
           // responseActive=true(还在生成)→ 走完整打断(response.cancel + truncate + 清 app 缓冲);
@@ -728,7 +707,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
 
       case "response.cancelled":
       case "response.done":
-        qwenDbg("event." + event.type, { pendingBefore: this.responseCreatePending });
         this.responseActive = false;
         this.responseCreateInFlight = false;
         this.responseCancelInFlight = false;
@@ -778,7 +756,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
 
       case "error": {
         const detail = readRealtimeErrorDetail(event.error);
-        qwenDbg("event.error", { detail: detail.slice(0, 120) });
         // 响应已在进行：重同步 responseActive，别把这轮吞掉。
         if (detail.startsWith(QWEN_REALTIME_ACTIVE_RESPONSE_ERROR_PREFIX)) {
           this.responseActive = true;
@@ -836,7 +813,6 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.responseActive &&
       !this.responseCancelInFlight
     ) {
-      qwenDbg("handleBargeIn.SENT response.cancel");
       this.sendEvent({ type: "response.cancel" }, "reason=barge-in");
       this.responseCancelInFlight = true;
     }
@@ -883,7 +859,10 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.config.onToolCall({ itemId, callId, name, args });
   }
 
-  private requestResponseCreate(): void {
+  private requestResponseCreate(instructions?: string): void {
+    if (instructions) {
+      this.pendingResponseInstructions = instructions; // 沿 pending 链保留到真正发出
+    }
     if (
       this.responseActive ||
       this.responseCreateInFlight ||
@@ -891,22 +870,20 @@ class QwenRealtimeVoiceBridge implements RealtimeVoiceBridge {
       this.continuingToolCallIds.size > 0
     ) {
       this.responseCreatePending = true;
-      qwenDbg("requestResponseCreate.GATED->pending", {
-        responseActive: this.responseActive,
-        responseCreateInFlight: this.responseCreateInFlight,
-        responseCancelInFlight: this.responseCancelInFlight,
-        continuing: this.continuingToolCallIds.size,
-      });
       return;
     }
     this.responseCreatePending = false;
     this.responseCreateInFlight = true;
-    qwenDbg("requestResponseCreate.SENT response.create");
-    this.sendEvent({ type: "response.create" });
+    const perResponse = this.pendingResponseInstructions;
+    this.pendingResponseInstructions = undefined;
+    this.sendEvent(
+      perResponse
+        ? { type: "response.create", response: { instructions: perResponse } }
+        : { type: "response.create" },
+    );
   }
 
   private flushPendingResponseCreate(): void {
-    qwenDbg("flushPendingResponseCreate", { pending: this.responseCreatePending });
     if (!this.responseCreatePending) {
       return;
     }
