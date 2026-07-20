@@ -1,6 +1,6 @@
 // Chat gateway methods implement chat.send/history/abort/inject/metadata and
 // bridge UI RPCs to agent dispatch, transcripts, media, and streaming state.
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -59,7 +59,11 @@ import {
   type StageSandboxMediaResult,
 } from "../../auto-reply/reply/stage-sandbox-media.js";
 import type { MsgContext, TemplateContext } from "../../auto-reply/templating.js";
-import { resolveSessionFilePath, updateSessionStoreEntry } from "../../config/sessions.js";
+import {
+  resolveAndPersistSessionFile,
+  resolveSessionFilePath,
+  updateSessionStoreEntry,
+} from "../../config/sessions.js";
 import { resolveMirroredTranscriptText } from "../../config/sessions/transcript-mirror.js";
 import { CURRENT_SESSION_VERSION } from "../../config/sessions/version.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -5036,6 +5040,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const {
       cfg,
       storePath,
+      store,
       entry,
       canonicalKey: sessionKey,
     } = loadSessionEntry(rawSessionKey, sessionLoadOptions);
@@ -5048,9 +5053,14 @@ export const chatHandlers: GatewayRequestHandlers = {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, selectedAgent.error));
       return;
     }
-    const sessionId = entry?.sessionId;
-    if (!sessionId || !storePath) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "session not found"));
+    // storePath is resolved even for a not-yet-materialized session; its absence is a real
+    // config error, not "session missing".
+    if (!storePath) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "session store unavailable"),
+      );
       return;
     }
     const agentId = resolveSessionAgentId({
@@ -5059,13 +5069,38 @@ export const chatHandlers: GatewayRequestHandlers = {
       agentId: selectedAgent.agentId,
     });
 
+    // Materialize-on-first-content. A chat.inject may target a session that has not been created
+    // yet — e.g. 情境推荐点开即起的 session:rec:<id>, or any proactive assistant opening that should
+    // become the genesis turn before the user replies. Historically inject bailed with
+    // "session not found" because only chat.send (a user turn) minted the session container, which
+    // welded materialization to the user-send path and made an assistant-authored opening impossible
+    // as a session's first entry. Here we mint the container on first inject, sharing the exact
+    // low-level persist primitive (resolveAndPersistSessionFile) that initSessionState uses on the
+    // send path, so the store baseline is identical to a send-created session. This makes
+    // materialization content-driven rather than turn-type-driven. A later chat.send for the same
+    // key reuses this entry (same sessionId in store) rather than starting a new session.
+    let sessionId = entry?.sessionId;
+    let sessionFile = entry?.sessionFile;
+    if (!sessionId) {
+      sessionId = randomUUID();
+      const ensured = await resolveAndPersistSessionFile({
+        sessionId,
+        sessionKey,
+        sessionStore: store,
+        storePath,
+        agentId,
+        sessionsDir: path.dirname(storePath),
+      });
+      sessionFile = ensured.sessionFile;
+    }
+
     const appended = await appendAssistantTranscriptMessage({
       sessionKey,
       message: p.message,
       label: p.label,
       sessionId,
       storePath,
-      sessionFile: entry?.sessionFile,
+      sessionFile,
       agentId,
       createIfMissing: true,
       cfg,
