@@ -282,6 +282,57 @@ describe("embedded attempt session lock lifecycle", () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  it("does not reacquire after dispose when a residual aborted prompt unwinds late", async () => {
+    // chat.abort leak: abort releases the held lock, attempt teardown disposes
+    // the controller, then the aborted prompt's in-flight tool finally returns
+    // and its finally-block reacquire must NOT take the lock again — nobody
+    // would release it afterwards.
+    const release = vi.fn(async () => {});
+    const acquireSessionWriteLockLocal27 = vi.fn(async () => ({ release }));
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock: acquireSessionWriteLockLocal27,
+      lockOptions,
+    });
+
+    await controller.releaseHeldLockForAbort();
+    await controller.dispose();
+    await controller.reacquireAfterPrompt();
+
+    expect(acquireSessionWriteLockLocal27).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a reacquire lock that resolves after dispose instead of leaking it", async () => {
+    const firstRelease = vi.fn(async () => {});
+    const secondRelease = vi.fn(async () => {});
+    let resolveSecondAcquire!: (lock: { release: () => Promise<void> }) => void;
+    const acquireSessionWriteLockLocal28 = vi
+      .fn()
+      .mockResolvedValueOnce({ release: firstRelease })
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ release: () => Promise<void> }>((resolve) => {
+            resolveSecondAcquire = resolve;
+          }),
+      );
+    const controller = await createEmbeddedAttemptSessionLockController({
+      acquireSessionWriteLock: acquireSessionWriteLockLocal28,
+      lockOptions,
+    });
+
+    await controller.releaseHeldLockForAbort();
+    const reacquire = controller.reacquireAfterPrompt();
+    await vi.waitFor(() => {
+      expect(acquireSessionWriteLockLocal28).toHaveBeenCalledTimes(2);
+    });
+    await controller.dispose();
+    resolveSecondAcquire({ release: secondRelease });
+    await reacquire;
+
+    expect(firstRelease).toHaveBeenCalledTimes(1);
+    expect(secondRelease).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for pending timeout abort release before dispose resolves (#86816)", async () => {
     let markHeldReleaseStarted!: () => void;
     const heldReleaseStarted = new Promise<void>((resolve) => {

@@ -255,6 +255,24 @@ describe("createNodesTool screen_record duration guardrails", () => {
     expect(call?.[2].params?.durationMs).toBe(300_000);
   });
 
+  it("threads the run abort signal into gateway calls so chat.abort cancels node.invoke", async () => {
+    gatewayMocks.callGatewayTool.mockResolvedValue({ ok: true });
+    const tool = createNodesTool();
+    const abortController = new AbortController();
+
+    await tool.execute(
+      "call-abort-signal",
+      { action: "invoke", node: "phone", invokeCommand: "device.info" },
+      abortController.signal,
+    );
+
+    expect(gatewayMocks.callGatewayTool).toHaveBeenCalledWith(
+      "node.invoke",
+      expect.objectContaining({ signal: abortController.signal }),
+      expect.anything(),
+    );
+  });
+
   it.each([
     ["screen_record", 0],
     ["screen_record", 1.5],

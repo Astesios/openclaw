@@ -919,17 +919,11 @@ function waitForSessionFileOwnerRelease(params: {
     };
     const timeoutMs = resolveSessionFileOwnerWaitTimeoutMs(params.timeoutMs);
     if (timeoutMs !== undefined) {
-      waiter.timer = setTimeout(
-        () => {
-          waiter.reject(
-            new EmbeddedAttemptSessionFileOwnerTimeoutError(
-              params.sessionFile,
-              timeoutMs,
-            ),
-          );
-        },
-        timeoutMs,
-      );
+      waiter.timer = setTimeout(() => {
+        waiter.reject(
+          new EmbeddedAttemptSessionFileOwnerTimeoutError(params.sessionFile, timeoutMs),
+        );
+      }, timeoutMs);
       waiter.timer.unref?.();
     }
     if (params.signal) {
@@ -1176,6 +1170,7 @@ export async function createEmbeddedAttemptSessionLockController(params: {
   let fenceGeneration = 0;
   let fenceActive = false;
   let takeoverDetected = false;
+  let disposed = false;
   let retainedLockUseCount = 0;
   const retainedLockIdleWaiters = new Set<() => void>();
   let heldLockDraining = false;
@@ -1986,10 +1981,18 @@ export async function createEmbeddedAttemptSessionLockController(params: {
     },
     async reacquireAfterPrompt(): Promise<void> {
       await waitForHeldLockDrain();
-      if (takeoverDetected || heldLock) {
+      if (disposed || takeoverDetected || heldLock) {
         return;
       }
       const lock = await acquireLock();
+      if (disposed) {
+        // A residual aborted prompt can reach this reacquire after attempt
+        // teardown already disposed the controller. Keeping the fresh lock
+        // would leak it until the maxHoldMs watchdog fires, blocking every
+        // later chat.send on this session with SessionWriteLockTimeoutError.
+        await lock.release();
+        return;
+      }
       try {
         heldLock = lock;
         await assertSessionFileFence();
@@ -2027,6 +2030,9 @@ export async function createEmbeddedAttemptSessionLockController(params: {
       return takeoverDetected;
     },
     async dispose(): Promise<void> {
+      // Terminal: bar any later reacquireAfterPrompt from a residual aborted
+      // prompt — after disposal nobody would ever release that lock again.
+      disposed = true;
       try {
         await disposeHeldLockAfterRetainedIdle();
       } finally {

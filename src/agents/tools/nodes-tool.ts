@@ -149,10 +149,16 @@ export function createNodesTool(options?: {
     description:
       "Discover/control paired nodes: status, describe, pairing, notify, camera/photos/screen/location/notifications/invoke. Use file_fetch for files.",
     parameters: NodesToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId, args, signal) => {
       const params = args as Record<string, unknown>;
       const action = readStringParam(params, "action", { required: true });
-      const gatewayOpts = readGatewayCallOptions(params);
+      // Thread the run's abort signal into every gateway call so chat.abort
+      // cancels in-flight node.invoke instead of leaving it running for up to
+      // the node.invoke timeout in the background.
+      const gatewayOpts: ReturnType<typeof readGatewayCallOptions> = {
+        ...readGatewayCallOptions(params),
+        ...(signal ? { signal } : {}),
+      };
 
       try {
         switch (action) {

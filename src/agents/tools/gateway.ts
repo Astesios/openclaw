@@ -33,6 +33,8 @@ export type GatewayCallOptions = {
   gatewayUrl?: string;
   gatewayToken?: string;
   timeoutMs?: number;
+  /** Aborts the in-flight gateway call when the tool run is aborted. */
+  signal?: AbortSignal;
 };
 
 type GatewayOverrideTarget = "local" | "remote";
@@ -292,6 +294,7 @@ export async function callGatewayTool<T = Record<string, unknown>>(
     method,
     params,
     timeoutMs: gateway.timeoutMs,
+    ...(opts.signal ? { signal: opts.signal } : {}),
     expectFinal: extra?.expectFinal,
     clientName: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
     clientDisplayName: "agent",

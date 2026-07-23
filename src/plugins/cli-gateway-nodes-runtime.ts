@@ -52,6 +52,7 @@ export function createPluginCliGatewayNodesRuntime(): PluginRuntime["nodes"] {
           idempotencyKey: params.idempotencyKey || randomUUID(),
         },
         timeoutMs: resolvePluginCliNodeInvokeGatewayTimeoutMs(params.timeoutMs),
+        ...(params.signal ? { signal: params.signal } : {}),
         clientName: GATEWAY_CLIENT_NAMES.CLI,
         mode: GATEWAY_CLIENT_MODES.CLI,
       });
