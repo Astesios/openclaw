@@ -1095,6 +1095,76 @@ describe("gateway server chat", () => {
     }
   });
 
+  test("chat.abort with a bare session key matches runs registered under the canonical key", async () => {
+    // Clients may send the same bare key ("session_<ts>") they used for
+    // chat.send; the run is registered under the canonical "agent:<id>:…"
+    // key, so abort must canonicalize before matching or it silently no-ops.
+    const abortResponses: Array<{ ok: boolean; payload?: unknown; error?: unknown }> = [];
+    const controller = new AbortController();
+    const context = {
+      logGateway: {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+      },
+      agentRunSeq: new Map<string, number>(),
+      chatAbortControllers: new Map([
+        [
+          "run-bare-key",
+          {
+            controller,
+            sessionId: "sess-bare",
+            sessionKey: "agent:main:session_1784774973815",
+            startedAtMs: Date.now(),
+            expiresAtMs: Date.now() + 60_000,
+          },
+        ],
+      ]),
+      chatAbortedRuns: new Map(),
+      chatRunBuffers: new Map(),
+      chatDeltaSentAt: new Map(),
+      chatDeltaLastBroadcastLen: new Map(),
+      chatDeltaLastBroadcastText: new Map(),
+      agentDeltaSentAt: new Map(),
+      bufferedAgentEvents: new Map(),
+      clearChatRunState: vi.fn(),
+      addChatRun: vi.fn(),
+      removeChatRun: vi.fn(),
+      broadcast: vi.fn(),
+      nodeSendToSession: vi.fn(),
+      registerToolEventRecipient: vi.fn(),
+      getRuntimeConfig: () => ({}),
+      dedupe: new Map(),
+    } as unknown as GatewayRequestContext;
+    const client = {
+      connId: "conn-bare",
+      connect: { device: { id: "dev-bare" }, scopes: ["operator.write"] },
+    } as never;
+    const params = { sessionKey: "session_1784774973815" };
+
+    const { chatHandlers } = await import("./server-methods/chat.js");
+    await chatHandlers["chat.abort"]({
+      req: { type: "req", id: "abort-bare", method: "chat.abort", params },
+      params,
+      client,
+      isWebchatConnect: () => false,
+      respond: ((ok, payload, error) => {
+        abortResponses.push({ ok, payload, error });
+      }) as RespondFn,
+      context,
+    });
+
+    expect(abortResponses).toEqual([
+      {
+        ok: true,
+        payload: { ok: true, aborted: true, runIds: ["run-bare-key"] },
+        error: undefined,
+      },
+    ]);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
   test.each(configuredImageModelCases)(
     "chat.send preserves text-only image uploads as MediaPaths even with configured imageModel: $id",
     async ({ id, imageModel }) => {

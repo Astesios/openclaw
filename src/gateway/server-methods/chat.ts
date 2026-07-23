@@ -2957,8 +2957,11 @@ export const chatHandlers: GatewayRequestHandlers = {
     const abortCfg = context.getRuntimeConfig();
     const defaultAgentId = resolveDefaultAgentId(abortCfg);
     const parsedAbortSessionKey = parseAgentSessionKey(rawSessionKey);
-    const abortSessionResolvesGlobal =
-      resolveSessionStoreKey({ cfg: abortCfg, sessionKey: rawSessionKey }) === "global";
+    const resolvedAbortSessionKey = resolveSessionStoreKey({
+      cfg: abortCfg,
+      sessionKey: rawSessionKey,
+    });
+    const abortSessionResolvesGlobal = resolvedAbortSessionKey === "global";
     const inferredGlobalAgentId =
       !agentIdOverride && parsedAbortSessionKey && abortSessionResolvesGlobal
         ? normalizeAgentId(parsedAbortSessionKey.agentId)
@@ -2982,8 +2985,11 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    // Use the store-canonical key for run matching: clients may send bare keys
+    // (e.g. "session_<ts>") that chat.send canonicalizes to "agent:<id>:…" when
+    // registering the run — matching on the raw key would silently abort nothing.
     const canonicalAbortSessionKey =
-      abortAgentId && abortSessionResolvesGlobal ? "global" : rawSessionKey;
+      abortAgentId && abortSessionResolvesGlobal ? "global" : resolvedAbortSessionKey;
 
     const ops = createChatAbortOps(context);
     const requester = resolveChatAbortRequester(client);
