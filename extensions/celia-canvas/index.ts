@@ -182,30 +182,24 @@ export default definePluginEntry({
         label: "推送卡片",
         description:
           "推送结构化卡片到 Celia 客户端（同时持久化到会话记录以便历史重载）。" +
-          "Agent 推卡片必须调本工具，不要在 assistant text 中写 [celia_card] 标记（已弃用）。",
+          "Agent 推卡片必须调本工具，不要在 assistant text 中写 [celia_card] 标记（已弃用）。" +
+          "推卡前先输出一句自然语言文本（卡片锚定在最近一条文本之后，前面没有文本则卡不显示）。" +
+          "设备命令返回 _cardRendered:true 表示客户端已自动渲染，勿再重复推同一内容。" +
+          "必须在主 Agent 会话调用：subagent 推卡会落到子会话，主对话看不到。",
         parameters: {
           type: "object",
           properties: {
             type: {
               type: "string",
               description:
-                "卡片类型：" +
-                "space_card（任务空间，含 phase 字段） | " +
-                "resource_card（通用资源/文件） | " +
-                "hotel_card | flight_card | scenic_card | poi_card（模板卡片）",
+                "卡片类型。支持的类型清单与各类型 payload 字段以 TOOLS.md「支持的卡片类型」表为准" +
+                "（也可用 canvas.card.schemas 命令查询）。",
             },
             payload: {
               type: "object",
               description:
-                "卡片业务数据，按 type 不同字段不同：\n" +
-                "- space_card: { phase: 'suggest'|'created', suggestionId, name, " +
-                "spaceId?(created必填), subtitle?, tags?, moveFromTemp?, reason? }。" +
-                "phase=suggest 时 suggestionId 必填；phase=created 时 spaceId 必填，suggestionId 选填" +
-                "（带上则客户端自动合并到原 suggest 卡）。\n" +
-                "- resource_card: { resourceType, id, title, subtitle?, thumbnail?, filePath?, action? }。" +
-                "新文件用 action:'create' 或省略；更新已有文件才用 action:'update'。\n" +
-                "- 模板卡片: { summaryText?, items:[...] }\n" +
-                "- caption?（所有卡通用，强烈推荐）：一句引导/总结文本。客户端会把它渲染成" +
+                "卡片业务数据，字段按 type 不同，见 TOOLS.md「支持的卡片类型」表。\n" +
+                "通用字段 caption?（所有卡可用，强烈推荐）：一句引导/总结文本。客户端会把它渲染成" +
                 "紧贴在这张卡正上方的一条文本气泡。caption 与卡是同一次推送的原子单元，" +
                 "顺序写死、不会错位——需要「文本+卡」成对出现时，用 caption 而不是单独发一段 assistant 文本。",
             },
