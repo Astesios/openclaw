@@ -19,6 +19,7 @@ import {
   NODE_PRESENCE_ALIVE_EVENT,
   normalizeNodePresenceAliveReason,
 } from "../shared/node-presence.js";
+import { clearCollabState, setCollabState } from "./collab-state.js";
 import type { NodeEvent, NodeEventContext } from "./server-node-events-types.js";
 import {
   agentCommandFromIngress,
@@ -659,6 +660,53 @@ export const handleNodeEvent = async (
           source: "notifications-event",
           intent: "event",
           reason: "notifications-event",
+          sessionKey,
+        });
+      }
+      return undefined;
+    }
+    case "collab.entered": {
+      // FlowOS 折叠机分屏进入:左侧第三方 app + 右侧 floai AI。持久化"左侧是谁/能否读",
+      // 供 get-reply-run 每轮注入(持续感知);同时发一条转场系统事件唤醒 agent。
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return undefined;
+      }
+      const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? `node-${nodeId}`;
+      const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+      const leftPackage = normalizeOptionalString(obj.leftPackage);
+      const leftAppLabel = normalizeOptionalString(obj.leftAppLabel);
+      const readable = obj.readable === true || obj.readable === "true";
+      setCollabState(sessionKey, { leftPackage, leftAppLabel, readable });
+
+      const label = leftAppLabel
+        ? sanitizeInboundSystemTags(leftAppLabel)
+        : leftPackage
+          ? sanitizeInboundSystemTags(leftPackage)
+          : "未知应用";
+      const summary = `进入分屏协作:左侧=${label}(${readable ? "可读" : "不可读"})`;
+      const queued = enqueueSystemEvent(summary, { sessionKey, contextKey: "collab" });
+      if (queued) {
+        requestHeartbeat({
+          source: "collab-event",
+          intent: "event",
+          reason: "collab-entered",
+          sessionKey,
+        });
+      }
+      return undefined;
+    }
+    case "collab.exited": {
+      const obj = parsePayloadObject(evt.payloadJSON);
+      const sessionKeyRaw = normalizeOptionalString(obj?.sessionKey) ?? `node-${nodeId}`;
+      const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+      clearCollabState(sessionKey);
+      const queued = enqueueSystemEvent("退出分屏协作", { sessionKey, contextKey: "collab" });
+      if (queued) {
+        requestHeartbeat({
+          source: "collab-event",
+          intent: "event",
+          reason: "collab-exited",
           sessionKey,
         });
       }
