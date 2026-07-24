@@ -45,6 +45,16 @@ const orphanedCardsBySession = new Map<string, StagedCard[]>();
 const textAnchorBaseBySession = new Map<string, number>();
 const lastRunIdBySession = new Map<string, string>();
 
+// ── 兜底：不发 llm_output 钩子的 runtime（交互对话走的 embedded/acpx runner）──
+//
+// 部分 runtime 根本不触发 llm_output / agent_end 等生命周期钩子，导致下面的延迟 flush
+// 永不执行、卡片永远 staged 发不出去（cron/cli-runner 会触发，故 dreaming/定时任务的卡正常，
+// 而交互对话的卡不显示）。用「本 session 是否见过 llm_output」区分两类 runtime：push_card 时挂
+// 一个兜底定时器，窗口内若已被 llm_output 按 anchor flush 掉 → 定时器空跑（不破坏 anchor 定位）；
+// 窗口后仍 staged 且本 session 从未见过 llm_output → 判定为不发钩子的 runtime，就地无 anchor 投递。
+const llmOutputSeenBySession = new Map<string, boolean>();
+const NO_HOOK_FALLBACK_MS = 8000;
+
 function hasNonEmptyText(block: unknown): block is { type: "text"; text: string } {
   return (
     typeof block === "object" &&
@@ -220,6 +230,32 @@ export default definePluginEntry({
             api.logger.info(
               `[celia-canvas] push_card staged: toolCallId=${toolCallId} type=${type} sessionKey=${sessionKey} totalStaged=${stagedCardsByToolCallId.size}`,
             );
+            // 兜底：不发 llm_output 钩子的 runtime（embedded/acpx）→ 窗口后就地投递。
+            // 窗口内被 llm_output flush（发钩子的 runtime）→ staged 已删，定时器空跑，anchor 定位不受影响。
+            const fbKey = sessionKey;
+            const fbToolCallId = toolCallId;
+            const fbCardJson = cardJson;
+            setTimeout(() => {
+              const stillStaged = stagedCardsByToolCallId.get(fbToolCallId);
+              if (!stillStaged) return; // 已被 llm_output 按 anchor flush
+              if (llmOutputSeenBySession.get(fbKey)) return; // 发钩子的 runtime：交给正常流程（orphan 等下个 text anchor）
+              // 本 session 从未见过 llm_output → 不发钩子的 runtime，就地无 anchor 投递
+              stagedCardsByToolCallId.delete(fbToolCallId);
+              const orphans = orphanedCardsBySession.get(fbKey);
+              if (orphans) {
+                const idx = orphans.indexOf(stillStaged);
+                if (idx >= 0) orphans.splice(idx, 1);
+              }
+              const nodeSend = getNodeSend();
+              if (nodeSend)
+                nodeSend(toNodeSessionKey(fbKey), "canvas.card.push", { cardJson: fbCardJson });
+              void injectMessageBySessionKey(fbKey, `[celia_card]${fbCardJson}`).catch((err) => {
+                api.logger.error(`[celia-canvas] fallback inject failed: ${String(err)}`);
+              });
+              api.logger.info(
+                `[celia-canvas] push_card fallback flush (no-hook runtime): toolCallId=${fbToolCallId} sessionKey=${fbKey}`,
+              );
+            }, NO_HOOK_FALLBACK_MS);
           }
 
           // 返回 _cardRendered: true 保持和 Agent prompt（TOOLS.md / 各 SKILL）的契约不变 ——
@@ -243,6 +279,8 @@ export default definePluginEntry({
         api.logger.info("[celia-canvas] llm_output: no sessionKey in ctx, skipping");
         return;
       }
+      // 标记：本 session 的 runtime 会发 llm_output → 走正常 anchor flush，push_card 兜底定时器不介入
+      llmOutputSeenBySession.set(sessionKey, true);
       // runId 变化 = 新一轮用户消息 → 重置累积锚点基数（对齐客户端 onUserMessage 重置）。
       // 放在 content 判空之前，保证新轮第一个 attempt 即使空 content 也能正确翻篇。
       const runId = (event as { runId?: string }).runId;
@@ -359,6 +397,10 @@ export default definePluginEntry({
     //
     // 代价：极端 case "Agent 推卡后真的不再说一句话" 时，orphans 沉睡到 session_end 才清，UI 不显示卡片。
     // 实际场景里 LLM 调完 tools 通常会再发起一次 attempt 总结结果，触发文本 anchor + carry-over → 正常 flush。
+    //
+    // ⚠️ 另有一类 runtime（交互对话走的 embedded/acpx runner）**根本不发 llm_output/agent_end 任何钩子**，
+    // 上面整条延迟 flush 都不会执行 → 卡永远 staged。这类由 push_card 里的 NO_HOOK_FALLBACK 定时器兜底
+    // （靠 llmOutputSeenBySession 判定），窗口后就地无 anchor 投递。见文件上方 llmOutputSeenBySession 注释。
 
     // 清理：session 结束 / 用户中断 / 超时 → 丢弃所有 staging
     api.on("session_end", (_event, ctx) => {
@@ -369,6 +411,7 @@ export default definePluginEntry({
       orphanedCardsBySession.delete(sessionKey);
       textAnchorBaseBySession.delete(sessionKey);
       lastRunIdBySession.delete(sessionKey);
+      llmOutputSeenBySession.delete(sessionKey);
       for (const [id, staged] of stagedCardsByToolCallId) {
         if (staged.sessionKey === sessionKey) {
           stagedCardsByToolCallId.delete(id);
