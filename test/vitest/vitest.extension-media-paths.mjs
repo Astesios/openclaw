@@ -6,6 +6,7 @@ export const mediaExtensionTestRoots = [
   "extensions/fal",
   "extensions/image-generation-core",
   "extensions/pixverse",
+  "extensions/qwen-audio-tts",
   "extensions/runway",
   "extensions/talk-voice",
   "extensions/video-generation-core",
