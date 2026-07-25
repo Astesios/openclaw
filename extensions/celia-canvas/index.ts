@@ -192,8 +192,7 @@ export default definePluginEntry({
             type: {
               type: "string",
               description:
-                "卡片类型。支持的类型清单与各类型 payload 字段以 TOOLS.md「支持的卡片类型」表为准" +
-                "（也可用 canvas.card.schemas 命令查询）。",
+                "卡片类型。支持的类型清单与各类型 payload 字段以 TOOLS.md「支持的卡片类型」表为准。",
             },
             payload: {
               type: "object",
