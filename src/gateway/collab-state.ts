@@ -31,7 +31,10 @@ function requireSessionKey(key?: string | null): string {
   if (!trimmed) {
     throw new Error("collab state requires a sessionKey");
   }
-  return trimmed;
+  // 归一化到裸 session id:设备(node.event)发的是裸键 "session_xxx",而 reply 侧(get-reply-run)
+  // 用的是 agent 作用域键 "agent:<id>:session_xxx"。两端都去掉 "agent:<id>:" 前缀,保证存/读同键,
+  // 否则 collab 状态存进去却读不出 → agent 误判"不在分屏"。
+  return trimmed.replace(/^agent:[^:]+:/, "");
 }
 
 export function setCollabState(
@@ -71,7 +74,8 @@ export function clearCollabState(sessionKey: string): void {
  * 内容仅元信息(左侧是谁/能否读)+ 读屏工具指引;实际内容由 agent 按需 pull。
  */
 export function buildCollabContextPrompt(sessionKey?: string | null): string | null {
-  const key = normalizeOptionalString(sessionKey);
+  // 与 requireSessionKey 同款归一化:去 "agent:<id>:" 前缀,保证与 setCollabState 存的键一致。
+  const key = normalizeOptionalString(sessionKey)?.replace(/^agent:[^:]+:/, "");
   if (!key) {
     return null;
   }
