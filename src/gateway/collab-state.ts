@@ -16,8 +16,17 @@ export type CollabState = {
   leftPackage: string | null;
   /** 左侧 app 展示名 / 窗口标题(经清洗),可空。 */
   leftAppLabel: string | null;
-  /** 左侧内容是否可读:FLAG_SECURE / 无内容 → false。 */
+  /** 左侧内容是否可读:安全页 / 树里无节点 → false。 */
   readable: boolean;
+  /**
+   * 左侧是否是**安全页**(FLAG_SECURE,如银行/密码页)。
+   *
+   * 与 readable 分开是因为「读不出」有两种、能做的事不一样:
+   *  · secure=true → 树读不到、**截图也拿不到**,两条路都别试;
+   *  · secure=false 且 readable=false → 树是空的(自绘 Canvas/游戏/稀疏 Compose 树),
+   *    但**截图照样能看**。只有一个布尔时会把后者的截图路也一起劝退。
+   */
+  secure: boolean;
   /** 进入分屏的时间戳(ms)。 */
   since: number;
 };
@@ -43,6 +52,7 @@ export function setCollabState(
     leftPackage?: string | null;
     leftAppLabel?: string | null;
     readable?: boolean;
+    secure?: boolean;
     since?: number;
   },
 ): CollabState {
@@ -53,6 +63,7 @@ export function setCollabState(
     leftPackage: leftPackageRaw ? sanitizeInboundSystemTags(leftPackageRaw) : null,
     leftAppLabel: leftLabelRaw ? sanitizeInboundSystemTags(leftLabelRaw) : null,
     readable: input.readable === true,
+    secure: input.secure === true,
     since:
       typeof input.since === "number" && Number.isFinite(input.since) ? input.since : Date.now(),
   };
@@ -87,16 +98,29 @@ export function buildCollabContextPrompt(sessionKey?: string | null): string | n
   const pkgSuffix = state.leftPackage && state.leftAppLabel ? `(${state.leftPackage})` : "";
   const lines = [
     "【分屏协作态】当前处于折叠机分屏:左侧是第三方 app,右侧是你(floai)。",
-    `左侧应用:${label}${pkgSuffix};左侧内容${state.readable ? "可读" : "不可读(安全页/无内容)"}。`,
+    `左侧应用:${label}${pkgSuffix};左侧内容${
+      state.readable ? "可读" : state.secure ? "不可读(安全页)" : "文本树读不到内容(但可截图)"
+    }。`,
   ];
+  // 三态,别退回「可读/不可读」两态:文本树空 ≠ 什么都看不到,那种页面截图仍然有用。
   if (state.readable) {
     lines.push(
+      // ⚠️ 别写 {pane:'left'}:端侧压根不读这个参数(读哪个窗口由端侧按分屏/前台自行判定),
+      // 而 skill 文档明确写「不需要也不要传 pane」。这里若还教 agent 传,两边指令互相矛盾。
       "当用户问及左侧、或需基于左侧信息作答时,用 nodes 工具读取左屏:" +
-        "invoke screen.viewtree {pane:'left'} 取结构化文本树、invoke screen.capture {pane:'left'} 截图。" +
+        "invoke screen.viewtree 取结构化文本树、invoke screen.capture 截图(都不需要传参数)。" +
         "不必每轮都读,按需读取。",
     );
+  } else if (state.secure) {
+    lines.push(
+      "左侧是安全页(如银行/密码页),**文本树和截图都拿不到**,两种都不要尝试;" +
+        "如用户追问,直接说明该页受系统保护、无法读取。",
+    );
   } else {
-    lines.push("左侧不可读(如银行/密码页),不要尝试读取;如用户追问,直接说明该页无法读取。");
+    lines.push(
+      "左侧文本树读不到内容(多半是自绘界面/游戏/稀疏 Compose 树),**不要用 screen.viewtree**;" +
+        "但 **screen.capture 截图仍然可用** —— 需要知道左侧显示什么就截图看。",
+    );
   }
   lines.push("当前阶段仅支持读取左侧,不要尝试点击/输入/操作左侧。");
   return lines.join("\n");
