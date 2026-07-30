@@ -19,6 +19,7 @@ import {
   NODE_PRESENCE_ALIVE_EVENT,
   normalizeNodePresenceAliveReason,
 } from "../shared/node-presence.js";
+import { setAmbientState } from "./ambient-state.js";
 import { clearCollabState, setCollabState } from "./collab-state.js";
 import type { NodeEvent, NodeEventContext } from "./server-node-events-types.js";
 import {
@@ -677,7 +678,10 @@ export const handleNodeEvent = async (
       const leftPackage = normalizeOptionalString(obj.leftPackage);
       const leftAppLabel = normalizeOptionalString(obj.leftAppLabel);
       const readable = obj.readable === true || obj.readable === "true";
-      setCollabState(sessionKey, { leftPackage, leftAppLabel, readable });
+      // secure=true(FLAG_SECURE 安全页)连截图也拿不到;树空但非安全页则截图仍可用。
+      // 两者都 readable=false,故必须分开传,否则 prompt 只能给出"一律别读"的粗结论。
+      const secure = obj.secure === true || obj.secure === "true";
+      setCollabState(sessionKey, { leftPackage, leftAppLabel, readable, secure });
 
       const label = leftAppLabel
         ? sanitizeInboundSystemTags(leftAppLabel)
@@ -710,6 +714,32 @@ export const handleNodeEvent = async (
           sessionKey,
         });
       }
+      return undefined;
+    }
+    case "ambient.entered": {
+      // FlowOS 半模态面板:用户在某个 app 前台长按唤起 floai,端侧新建会话时上报"在哪个 app 唤起的"。
+      // 存进 ambient-state 供 get-reply-run 每轮注入(持续感知);页面内容由 agent 按需 pull
+      // (nodes invoke screen.viewtree/capture)。
+      //
+      // 与 collab.entered 的差别有意为之:
+      //  · **不发系统事件、不 requestHeartbeat** —— 端侧在发这条之后紧接着就 chat.send 首条消息
+      //    (同一条 ws、FIFO 保序),agent 本来就要被那条消息唤醒。再排一条系统事件是重复唤醒,
+      //    还会让 agent 在用户那句话之前先自说一句。分屏那条需要唤醒是因为进分屏本身没有用户消息。
+      //  · **没有 ambient.exited** —— 每次唤起面板都是新会话,状态随 sessionKey 天然作废。
+      const obj = parsePayloadObject(evt.payloadJSON);
+      if (!obj) {
+        return undefined;
+      }
+      const sessionKeyRaw = normalizeOptionalString(obj.sessionKey) ?? `node-${nodeId}`;
+      const { canonicalKey: sessionKey } = loadSessionEntry(sessionKeyRaw);
+      setAmbientState(sessionKey, {
+        pkg: normalizeOptionalString(obj.package),
+        appLabel: normalizeOptionalString(obj.appLabel),
+        title: normalizeOptionalString(obj.title),
+        readable: obj.readable === true || obj.readable === "true",
+        secure: obj.secure === true || obj.secure === "true",
+        nodeCount: Number(obj.nodeCount ?? 0),
+      });
       return undefined;
     }
     case "chat.subscribe": {
