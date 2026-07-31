@@ -547,10 +547,33 @@ function collectConfiguredGenerationProviderIds(
 
 function collectConfiguredVoiceProviderIds(config: OpenClawConfig): ConfiguredVoiceProviderIds {
   const providerIds = collectModelProviderIds(config.agents?.defaults?.voiceModel);
+  // ★ talk.realtime 点名的 realtime voice provider 也要算进启动加载集。
+  // 原实现只看 agents.defaults.voiceModel,于是 config 明明配了 talk.realtime.provider=qwen,
+  // 网关启动却不加载 qwen 插件 → 起呼时 "Realtime voice provider \"qwen\" is not registered"。
+  // (google 之前能用纯属搭便车:它是 agents.defaults.model.fallbacks 里 google/* 的模型 provider,
+  //  被加载时顺带注册了自己的 realtime voice provider。)
+  const realtime = (
+    config as {
+      talk?: { realtime?: { provider?: unknown; providers?: Record<string, unknown> } };
+    }
+  ).talk?.realtime;
+  const realtimeVoiceProviders = new Set(providerIds);
+  if (typeof realtime?.provider === "string") {
+    const configuredId = normalizeProviderId(realtime.provider);
+    if (configuredId) {
+      realtimeVoiceProviders.add(configuredId);
+    }
+  }
+  for (const providerId of Object.keys(realtime?.providers ?? {})) {
+    const normalized = normalizeProviderId(providerId);
+    if (normalized) {
+      realtimeVoiceProviders.add(normalized);
+    }
+  }
   return {
     speechProviders: providerIds,
     realtimeTranscriptionProviders: providerIds,
-    realtimeVoiceProviders: providerIds,
+    realtimeVoiceProviders,
   };
 }
 
