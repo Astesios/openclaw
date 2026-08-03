@@ -43,7 +43,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_PAT }}
 
-      # 默认参数 build（OPENCLAW_EXTENSIONS 空、default variant），与本地基线镜像一致
+      # default variant build；OPENCLAW_EXTENSIONS 保留 floai 自建能力依赖的插件。
+      # ★ qwen 必须显式保留:根 package.json 的 files 里有 `!dist/extensions/qwen/**`
+      #   (上游把 qwen 当独立发布的 npm 插件),Docker 的 prune-docker-plugin-dist.mjs 会据此
+      #   把 qwen 从镜像 dist 里删掉 —— 而我们在 extensions/qwen 自建了 realtime-voice-provider,
+      #   删掉后实时通话起呼必报 "Realtime voice provider \"qwen\" is not registered"。
+      #   注意本地 build 不受 files 影响,只有镜像会被 prune,所以本地验通不代表云上可用。
       - name: build + 推 digest（${{ matrix.arch }}）
         id: build
         uses: docker/build-push-action@v6
@@ -52,6 +57,8 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           provenance: false
+          build-args: |
+            OPENCLAW_EXTENSIONS=qwen
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: 导出 digest
