@@ -4,6 +4,10 @@
           - "extensions/azure-speech/**"
           - "docs/providers/azure-speech.md"
           - "docs/tools/tts.md"
+"plugin: flowos-task-center-auth":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "extensions/flowos-task-center-auth/**"
 "plugin: file-transfer":
   - changed-files:
       - any-glob-to-any-file:
