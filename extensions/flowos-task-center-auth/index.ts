@@ -60,6 +60,30 @@ async function signJwt(payload: Record<string, unknown>, secret: string): Promis
   return `${header}.${body}.${base64url(new Uint8Array(signature))}`;
 }
 
+export async function issueDeviceEventJwt(
+  binding: Pick<DeviceEventBinding, "hubDeviceId" | "tenantId" | "subjectUserId">,
+  secret: string,
+  issuedAt = Math.floor(Date.now() / 1000),
+): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
+  const accessToken = await signJwt(
+    {
+      iss: deviceEventIssuer,
+      aud: deviceEventAudience,
+      sub: `device:${binding.hubDeviceId}`,
+      actorType: "DEVICE",
+      deviceId: binding.hubDeviceId,
+      tenantId: binding.tenantId,
+      subjectUserId: binding.subjectUserId,
+      scope: deviceEventScope,
+      iat: issuedAt,
+      exp: issuedAt + tokenLifetimeSeconds,
+      jti: globalThis.crypto.randomUUID(),
+    },
+    secret,
+  );
+  return { accessToken, tokenType: "Bearer", expiresIn: tokenLifetimeSeconds };
+}
+
 function reject(respond: GatewayRequestHandlerOptions["respond"], message: string): void {
   respond(false, undefined, { code: "INVALID_REQUEST", message });
 }
@@ -250,28 +274,7 @@ function registerDeviceEventTokenMethod(
         reject(respond, "active device ownership binding required");
         return;
       }
-      const issuedAt = Math.floor(Date.now() / 1000);
-      const accessToken = await signJwt(
-        {
-          iss: deviceEventIssuer,
-          aud: deviceEventAudience,
-          sub: `device:${binding.hubDeviceId}`,
-          actorType: "DEVICE",
-          deviceId: binding.hubDeviceId,
-          tenantId: binding.tenantId,
-          subjectUserId: binding.subjectUserId,
-          scope: deviceEventScope,
-          iat: issuedAt,
-          exp: issuedAt + tokenLifetimeSeconds,
-          jti: globalThis.crypto.randomUUID(),
-        },
-        secret,
-      );
-      respond(true, {
-        accessToken,
-        tokenType: "Bearer",
-        expiresIn: tokenLifetimeSeconds,
-      });
+      respond(true, await issueDeviceEventJwt(binding, secret));
     },
     { scope: "operator.read" },
   );
