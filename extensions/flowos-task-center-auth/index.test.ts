@@ -147,6 +147,50 @@ describe("flowos task-center auth", () => {
       "miniapp.function.invoke",
     ]);
   });
+
+  it("issues proactive-service tokens on their own audience", async () => {
+    // ★ 单独 audience 是这条的全部意义:主动服务的读接口会吐 userRef、订单号,
+    //   以及「这个人用哪些 App、什么时候在用」。一张任务中心的票不该顺带能拉走这些。
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
+    const { calls } = setup();
+    const [name, handler, options] = method(calls, "flowos.proactiveToken");
+    expect(name).toBe("flowos.proactiveToken");
+    expect(options).toEqual({ scope: "operator.read" });
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+    const claims = decodeClaims(respond.mock.calls[0][1].accessToken);
+    expect(respond.mock.calls[0][0]).toBe(true);
+    expect(claims).toMatchObject({
+      aud: "assist:proactive",
+      sub: "user:alice",
+      tenantId: "tenant-a",
+      // ★ actorType 是 #145 那版(gateway 主令牌)拿不出来的东西 —— 它认「是不是自己人」,
+      //   认不出是用户还是 Agent,于是「Agent 只能提议、要用户确认才生效」形同虚设。
+      actorType: "USER",
+      scope: "",
+    });
+    // 短时效:一张票最多活 5 分钟,泄露的窗口被这个数字框死
+    expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
+  });
+
+  it("requires a paired device for the proactive token too", async () => {
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.proactiveToken");
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: {}, respond });
+    expect(respond.mock.calls[0][0]).toBe(false);
+  });
+
+  it("rejects caller-supplied identity on the proactive token", async () => {
+    // 身份由服务端绑定,调用方不许自报 —— 否则任何配对设备都能签出别人的票
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.proactiveToken");
+    const respond = vi.fn();
+    await invoke(handler, { params: { sub: "user:mallory" }, client: pairedOperator(), respond });
+    expect(respond.mock.calls[0][0]).toBe(false);
+  });
 });
 
 describe("FlowOS Device Event identity", () => {
