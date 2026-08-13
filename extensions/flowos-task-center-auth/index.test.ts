@@ -46,11 +46,12 @@ function writeDeviceSecret(secret = "d".repeat(48), mode = 0o600): string {
   return secret;
 }
 
-function setup() {
+function setup(gatewayCredential?: string) {
   const records = new Map<string, StoredBinding>();
   const registerGatewayMethod = vi.fn();
   plugin.register({
     pluginConfig: { userId: "alice", tenantId: "tenant-a" },
+    config: { gateway: { auth: { token: gatewayCredential } } },
     registerGatewayMethod,
     runtime: {
       state: {
@@ -260,6 +261,7 @@ describe("FlowOS Device Event identity", () => {
     ["insecure permissions", "d".repeat(48), 0o644],
     ["too short", "short", 0o600],
     ["reused credential", "r".repeat(48), 0o600],
+    ["reused configured gateway token", "g".repeat(48), 0o600],
   ])("fails closed when the signing secret is %s", async (_label, secret, mode) => {
     if (secret !== undefined && mode !== undefined) {
       writeDeviceSecret(secret, mode);
@@ -267,7 +269,7 @@ describe("FlowOS Device Event identity", () => {
     if (_label === "reused credential") {
       process.env.FLOWOS_TASK_CENTER_JWT_SECRET = secret;
     }
-    const { calls } = setup();
+    const { calls } = setup(_label === "reused configured gateway token" ? secret : undefined);
     await upsertBinding(calls);
     const [, handler] = method(calls, "flowos.deviceEventToken");
     const respond = vi.fn();

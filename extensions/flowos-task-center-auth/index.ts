@@ -16,7 +16,7 @@ type DeviceEventBinding = {
 
 const pluginId = "flowos-task-center-auth";
 const deviceEventAudience = "assist:health-device-ingest";
-const deviceEventIssuer = "flowos-device-identity";
+const defaultDeviceEventIssuer = "flowos-device-identity";
 const deviceEventScope = "health.device-event.write";
 const tokenLifetimeSeconds = 300;
 const bindingsNamespace = "device-event-bindings";
@@ -64,10 +64,11 @@ export async function issueDeviceEventJwt(
   binding: Pick<DeviceEventBinding, "hubDeviceId" | "tenantId" | "subjectUserId">,
   secret: string,
   issuedAt = Math.floor(Date.now() / 1000),
+  issuer = defaultDeviceEventIssuer,
 ): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
   const accessToken = await signJwt(
     {
-      iss: deviceEventIssuer,
+      iss: issuer,
       aud: deviceEventAudience,
       sub: `device:${binding.hubDeviceId}`,
       actorType: "DEVICE",
@@ -101,7 +102,7 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function loadDeviceEventSecret(): string {
+function loadDeviceEventSecret(additionalCredentials: readonly unknown[]): string {
   const path = normalizedString(process.env.FLOWOS_DEVICE_EVENT_JWT_SECRET_FILE);
   if (!path) {
     return "";
@@ -113,10 +114,11 @@ function loadDeviceEventSecret(): string {
       return "";
     }
     const secret = readFileSync(path, "utf8").trim();
-    const reused = knownCredentialNames.some((name) => {
-      const existing = normalizedString(process.env[name]);
-      return existing.length > 0 && existing === secret;
-    });
+    const knownCredentials = [
+      ...knownCredentialNames.map((name) => process.env[name]),
+      ...additionalCredentials,
+    ];
+    const reused = knownCredentials.some((value) => normalizedString(value) === secret);
     return Buffer.byteLength(secret) >= 32 && !reused ? secret : "";
   } catch {
     return "";
@@ -249,6 +251,7 @@ function registerDeviceEventTokenMethod(
   api: OpenClawPluginApi,
   bindings: PluginStateKeyedStore<DeviceEventBinding>,
   secret: string,
+  issuer: string,
 ): void {
   api.registerGatewayMethod(
     "flowos.deviceEventToken",
@@ -274,7 +277,7 @@ function registerDeviceEventTokenMethod(
         reject(respond, "active device ownership binding required");
         return;
       }
-      respond(true, await issueDeviceEventJwt(binding, secret));
+      respond(true, await issueDeviceEventJwt(binding, secret, undefined, issuer));
     },
     { scope: "operator.read" },
   );
@@ -293,6 +296,13 @@ export default definePluginEntry({
     registerUserTokenMethod(api, config, "flowos.taskCenterToken", "assist:task-center", []);
     registerUserTokenMethod(api, config, "flowos.miniAppToken", "assist:miniapps", miniAppScopes);
     registerDeviceEventBindingMethods(api, bindings);
-    registerDeviceEventTokenMethod(api, bindings, loadDeviceEventSecret());
+    const issuer =
+      normalizedString(process.env.FLOWOS_DEVICE_EVENT_JWT_ISSUER) || defaultDeviceEventIssuer;
+    registerDeviceEventTokenMethod(
+      api,
+      bindings,
+      loadDeviceEventSecret([api.config.gateway?.auth?.token, api.config.gateway?.auth?.password]),
+      issuer,
+    );
   },
 });
