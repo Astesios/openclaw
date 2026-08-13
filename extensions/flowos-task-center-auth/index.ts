@@ -15,9 +15,11 @@ type DeviceEventBinding = {
 };
 
 const pluginId = "flowos-task-center-auth";
-const deviceEventAudience = "assist:health-device-ingest";
+const genericDeviceEventAudience = "assist:device-events";
+const legacyHealthDeviceEventAudience = "assist:health-device-ingest";
 const defaultDeviceEventIssuer = "flowos-device-identity";
-const deviceEventScope = "health.device-event.write";
+const genericDeviceEventScope = "device.event.write";
+const legacyHealthDeviceEventScope = "health.device-event.write";
 const tokenLifetimeSeconds = 300;
 const bindingsNamespace = "device-event-bindings";
 const knownCredentialNames = [
@@ -60,22 +62,24 @@ async function signJwt(payload: Record<string, unknown>, secret: string): Promis
   return `${header}.${body}.${base64url(new Uint8Array(signature))}`;
 }
 
-export async function issueDeviceEventJwt(
+async function issueBoundDeviceJwt(
   binding: Pick<DeviceEventBinding, "hubDeviceId" | "tenantId" | "subjectUserId">,
   secret: string,
+  audience: string,
+  scope: string,
   issuedAt = Math.floor(Date.now() / 1000),
   issuer = defaultDeviceEventIssuer,
 ): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
   const accessToken = await signJwt(
     {
       iss: issuer,
-      aud: deviceEventAudience,
+      aud: audience,
       sub: `device:${binding.hubDeviceId}`,
       actorType: "DEVICE",
       deviceId: binding.hubDeviceId,
       tenantId: binding.tenantId,
       subjectUserId: binding.subjectUserId,
-      scope: deviceEventScope,
+      scope,
       iat: issuedAt,
       exp: issuedAt + tokenLifetimeSeconds,
       jti: globalThis.crypto.randomUUID(),
@@ -83,6 +87,38 @@ export async function issueDeviceEventJwt(
     secret,
   );
   return { accessToken, tokenType: "Bearer", expiresIn: tokenLifetimeSeconds };
+}
+
+export async function issueDeviceEventJwt(
+  binding: Pick<DeviceEventBinding, "hubDeviceId" | "tenantId" | "subjectUserId">,
+  secret: string,
+  issuedAt = Math.floor(Date.now() / 1000),
+  issuer = defaultDeviceEventIssuer,
+): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
+  return issueBoundDeviceJwt(
+    binding,
+    secret,
+    genericDeviceEventAudience,
+    genericDeviceEventScope,
+    issuedAt,
+    issuer,
+  );
+}
+
+async function issueLegacyHealthDeviceEventJwt(
+  binding: Pick<DeviceEventBinding, "hubDeviceId" | "tenantId" | "subjectUserId">,
+  secret: string,
+  issuedAt = Math.floor(Date.now() / 1000),
+  issuer = defaultDeviceEventIssuer,
+): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
+  return issueBoundDeviceJwt(
+    binding,
+    secret,
+    legacyHealthDeviceEventAudience,
+    legacyHealthDeviceEventScope,
+    issuedAt,
+    issuer,
+  );
 }
 
 function reject(respond: GatewayRequestHandlerOptions["respond"], message: string): void {
@@ -252,9 +288,11 @@ function registerDeviceEventTokenMethod(
   bindings: PluginStateKeyedStore<DeviceEventBinding>,
   secret: string,
   issuer: string,
+  name: string,
+  issue: typeof issueDeviceEventJwt,
 ): void {
   api.registerGatewayMethod(
-    "flowos.deviceEventToken",
+    name,
     async ({ params, client, respond }: GatewayRequestHandlerOptions) => {
       const gatewayDeviceId = client?.connect.device?.id;
       if (!client?.isDeviceTokenAuth || client.connect.role !== "operator" || !gatewayDeviceId) {
@@ -277,7 +315,7 @@ function registerDeviceEventTokenMethod(
         reject(respond, "active device ownership binding required");
         return;
       }
-      respond(true, await issueDeviceEventJwt(binding, secret, undefined, issuer));
+      respond(true, await issue(binding, secret, undefined, issuer));
     },
     { scope: "operator.read" },
   );
@@ -298,11 +336,26 @@ export default definePluginEntry({
     registerDeviceEventBindingMethods(api, bindings);
     const issuer =
       normalizedString(process.env.FLOWOS_DEVICE_EVENT_JWT_ISSUER) || defaultDeviceEventIssuer;
+    const secret = loadDeviceEventSecret([
+      api.config.gateway?.auth?.token,
+      api.config.gateway?.auth?.password,
+    ]);
+    // Keep the original method stable for the legacy Health sink during the migration window.
     registerDeviceEventTokenMethod(
       api,
       bindings,
-      loadDeviceEventSecret([api.config.gateway?.auth?.token, api.config.gateway?.auth?.password]),
+      secret,
       issuer,
+      "flowos.deviceEventToken",
+      issueLegacyHealthDeviceEventJwt,
+    );
+    registerDeviceEventTokenMethod(
+      api,
+      bindings,
+      secret,
+      issuer,
+      "flowos.deviceEventToken.v1",
+      issueDeviceEventJwt,
     );
   },
 });

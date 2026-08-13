@@ -165,7 +165,7 @@ describe("FlowOS Device Event identity", () => {
       status: "active",
     });
 
-    const [, handler, options] = method(calls, "flowos.deviceEventToken");
+    const [, handler, options] = method(calls, "flowos.deviceEventToken.v1");
     expect(options).toEqual({ scope: "operator.read" });
     const respond = vi.fn();
     await invoke(handler, { params: {}, client: pairedOperator(), respond });
@@ -175,23 +175,38 @@ describe("FlowOS Device Event identity", () => {
     expect(payload).toMatchObject({ tokenType: "Bearer", expiresIn: 300 });
     expect(claims).toMatchObject({
       iss: "flowos-device-identity",
-      aud: "assist:health-device-ingest",
+      aud: "assist:device-events",
       sub: "device:hs-abc12345",
       actorType: "DEVICE",
       deviceId: "hs-abc12345",
       tenantId: "tenant-a",
       subjectUserId: "alice",
-      scope: "health.device-event.write",
+      scope: "device.event.write",
     });
     expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
     expect(typeof claims.jti).toBe("string");
+  });
+
+  it("keeps the original method on the legacy Health capability during migration", async () => {
+    writeDeviceSecret();
+    const { calls } = setup();
+    await upsertBinding(calls);
+    const [, handler] = method(calls, "flowos.deviceEventToken");
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+    const claims = decodeClaims(respond.mock.calls[0][1].accessToken);
+    expect(claims).toMatchObject({
+      aud: "assist:health-device-ingest",
+      scope: "health.device-event.write",
+    });
+    expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
   });
 
   it("creates a unique jti for every issuance", async () => {
     writeDeviceSecret();
     const { calls } = setup();
     await upsertBinding(calls);
-    const [, handler] = method(calls, "flowos.deviceEventToken");
+    const [, handler] = method(calls, "flowos.deviceEventToken.v1");
     const first = vi.fn();
     const second = vi.fn();
     await invoke(handler, { params: {}, client: pairedOperator(), respond: first });
