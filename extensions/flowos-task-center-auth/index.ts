@@ -15,9 +15,9 @@ type DeviceEventBinding = {
 };
 
 const pluginId = "flowos-task-center-auth";
-const deviceEventAudience = "assist:health-device-ingest";
+const deviceEventAudience = "assist:device-events";
 const defaultDeviceEventIssuer = "flowos-device-identity";
-const deviceEventScope = "health.device-event.write";
+const deviceEventScope = "device.event.write";
 const tokenLifetimeSeconds = 300;
 const bindingsNamespace = "device-event-bindings";
 const knownCredentialNames = [

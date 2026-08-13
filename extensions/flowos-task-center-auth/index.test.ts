@@ -175,13 +175,13 @@ describe("FlowOS Device Event identity", () => {
     expect(payload).toMatchObject({ tokenType: "Bearer", expiresIn: 300 });
     expect(claims).toMatchObject({
       iss: "flowos-device-identity",
-      aud: "assist:health-device-ingest",
+      aud: "assist:device-events",
       sub: "device:hs-abc12345",
       actorType: "DEVICE",
       deviceId: "hs-abc12345",
       tenantId: "tenant-a",
       subjectUserId: "alice",
-      scope: "health.device-event.write",
+      scope: "device.event.write",
     });
     expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
     expect(typeof claims.jti).toBe("string");
