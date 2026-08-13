@@ -165,7 +165,7 @@ describe("FlowOS Device Event identity", () => {
       status: "active",
     });
 
-    const [, handler, options] = method(calls, "flowos.deviceEventToken");
+    const [, handler, options] = method(calls, "flowos.deviceEventToken.v1");
     expect(options).toEqual({ scope: "operator.read" });
     const respond = vi.fn();
     await invoke(handler, { params: {}, client: pairedOperator(), respond });
@@ -187,11 +187,26 @@ describe("FlowOS Device Event identity", () => {
     expect(typeof claims.jti).toBe("string");
   });
 
-  it("creates a unique jti for every issuance", async () => {
+  it("keeps the original method on the legacy Health capability during migration", async () => {
     writeDeviceSecret();
     const { calls } = setup();
     await upsertBinding(calls);
     const [, handler] = method(calls, "flowos.deviceEventToken");
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+    const claims = decodeClaims(respond.mock.calls[0][1].accessToken);
+    expect(claims).toMatchObject({
+      aud: "assist:health-device-ingest",
+      scope: "health.device-event.write",
+    });
+    expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
+  });
+
+  it("creates a unique jti for every issuance", async () => {
+    writeDeviceSecret();
+    const { calls } = setup();
+    await upsertBinding(calls);
+    const [, handler] = method(calls, "flowos.deviceEventToken.v1");
     const first = vi.fn();
     const second = vi.fn();
     await invoke(handler, { params: {}, client: pairedOperator(), respond: first });
