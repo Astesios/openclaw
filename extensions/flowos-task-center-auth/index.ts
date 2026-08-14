@@ -333,6 +333,12 @@ export default definePluginEntry({
     });
     registerUserTokenMethod(api, config, "flowos.taskCenterToken", "assist:task-center", []);
     registerUserTokenMethod(api, config, "flowos.miniAppToken", "assist:miniapps", miniAppScopes);
+    // 主动服务(委托 / 事件入口 / 收件箱 / 入口审计)的用户主体票。
+    // ★ 单独一个 audience,不复用 assist:task-center —— 凭据要按用途分域:
+    //   一张任务中心的票不该顺带能拉走「这个人在关注什么、用哪些 App、什么时候在用」。
+    // ★ 也不复用 gateway 主令牌(#145 abbde061 的老做法):那是全局共享的长期凭据,
+    //   认不出「是用户还是 Agent」,且一台设备泄露即全部沦陷、无法单独吊销。
+    registerUserTokenMethod(api, config, "flowos.proactiveToken", "assist:proactive", []);
     registerDeviceEventBindingMethods(api, bindings);
     const issuer =
       normalizedString(process.env.FLOWOS_DEVICE_EVENT_JWT_ISSUER) || defaultDeviceEventIssuer;
