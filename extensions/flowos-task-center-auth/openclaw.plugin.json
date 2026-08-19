@@ -4,7 +4,10 @@
     "onStartup": false,
     "onConfigPaths": ["plugins.entries.flowos-task-center-auth"]
   },
-  "contracts": { "gatewayMethodDispatch": ["authenticated-request"] },
+  "contracts": {
+    "gatewayMethodDispatch": ["authenticated-request"],
+    "tools": ["proactive_concern"]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
