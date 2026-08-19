@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
@@ -30,7 +31,226 @@ const knownCredentialNames = [
   "HEALTH_CORE_WRITE_TOKEN",
   "MINIAPP_EVENT_CAPABILITY_SECRET",
   "HEALTH_BUDDY_INBOX_TOKEN",
+  "PROACTIVE_AGENT_TOKEN",
 ] as const;
+
+const proactiveConcernToolName = "proactive_concern";
+const proactiveAssistDefault = "http://127.0.0.1:18790";
+const proactiveAssistHosts = new Set(["127.0.0.1", "assist"]);
+const proactiveMaxResponseBytes = 1_000_000;
+const proactiveTestDisclosure = "仅为测试能力，不会执行真实监控或通知。";
+const proactiveSafeValidationFields = new Set([
+  "draftId",
+  "capabilityId",
+  "title",
+  "contextRef",
+  "parameters",
+  "conditions",
+  "field",
+  "operator",
+  "value",
+  "processing",
+  "delivery",
+  "mode",
+  "expiresAt",
+]);
+
+type ProactiveConcernParams = {
+  action: "catalog" | "compile";
+  draft?: Record<string, unknown>;
+};
+
+export function resolveTrustedAssistEndpoint(value: unknown): URL | null {
+  const raw = normalizedString(value) || proactiveAssistDefault;
+  try {
+    const endpoint = new URL(raw);
+    if (
+      endpoint.protocol !== "http:" ||
+      !proactiveAssistHosts.has(endpoint.hostname) ||
+      endpoint.port !== "18790" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.search ||
+      endpoint.hash ||
+      (endpoint.pathname !== "" && endpoint.pathname !== "/")
+    ) {
+      return null;
+    }
+    return endpoint;
+  } catch {
+    return null;
+  }
+}
+
+function safeProactiveValidationDetail(body: string): string {
+  try {
+    const payload = JSON.parse(body) as { detail?: unknown };
+    if (!Array.isArray(payload.detail)) {
+      return "";
+    }
+    return payload.detail
+      .slice(0, 5)
+      .flatMap((item) => {
+        if (!item || typeof item !== "object") {
+          return [];
+        }
+        const record = item as { loc?: unknown; msg?: unknown };
+        if (typeof record.msg !== "string") {
+          return [];
+        }
+        const fields = Array.isArray(record.loc)
+          ? record.loc.filter(
+              (part): part is string =>
+                typeof part === "string" && proactiveSafeValidationFields.has(part),
+            )
+          : [];
+        return [`${fields.slice(-2).join(".") || "request"}: ${record.msg.slice(0, 200)}`];
+      })
+      .join("; ");
+  } catch {
+    return "";
+  }
+}
+
+export async function requestProactiveConcern(
+  endpoint: URL,
+  token: string,
+  method: "GET" | "POST",
+  path: string,
+  payload?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const body = payload === undefined ? undefined : JSON.stringify(payload);
+  return await new Promise((resolve, rejectRequest) => {
+    const request = httpRequest(
+      {
+        protocol: endpoint.protocol,
+        hostname: endpoint.hostname,
+        port: endpoint.port,
+        method,
+        path,
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/json",
+          ...(body === undefined
+            ? {}
+            : { "content-type": "application/json", "content-length": Buffer.byteLength(body) }),
+        },
+        timeout: 15_000,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer | string) => {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += bytes.length;
+          if (size > proactiveMaxResponseBytes) {
+            request.destroy(new Error("Assist response exceeds 1,000,000 bytes"));
+            return;
+          }
+          chunks.push(bytes);
+        });
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          const status = response.statusCode ?? 0;
+          if (status < 200 || status >= 300) {
+            const detail = safeProactiveValidationDetail(text);
+            rejectRequest(
+              new Error(`Assist returned HTTP ${status}${detail ? `: ${detail}` : ""}`),
+            );
+            return;
+          }
+          try {
+            const parsed = JSON.parse(text) as unknown;
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+              throw new Error("Assist returned an invalid JSON object");
+            }
+            resolve(parsed as Record<string, unknown>);
+          } catch (error) {
+            rejectRequest(error);
+          }
+        });
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("Assist request timed out")));
+    request.on("error", rejectRequest);
+    if (body !== undefined) {
+      request.write(body);
+    }
+    request.end();
+  });
+}
+
+type ProactiveConcernRequester = typeof requestProactiveConcern;
+
+export function createProactiveConcernTool(
+  endpoint: URL | null,
+  token: string,
+  requester: ProactiveConcernRequester = requestProactiveConcern,
+) {
+  return {
+    name: proactiveConcernToolName,
+    label: "主动关注提案",
+    description: "读取受控 Concern 能力目录，或编译一条等待用户确认的 PROPOSED Concern。",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["catalog", "compile"] },
+        draft: { type: "object", additionalProperties: true },
+      },
+      required: ["action"],
+    },
+    async execute(_toolCallId: string, params: ProactiveConcernParams) {
+      try {
+        if (!endpoint || !token) {
+          throw new Error("proactive Concern service is not configured");
+        }
+        if (params.action !== "catalog" && params.action !== "compile") {
+          throw new Error("action must be catalog or compile");
+        }
+        if (params.action === "compile" && (!params.draft || typeof params.draft !== "object")) {
+          throw new Error("compile requires one draft object");
+        }
+        if (
+          params.draft &&
+          Buffer.byteLength(JSON.stringify(params.draft), "utf8") > proactiveMaxResponseBytes
+        ) {
+          throw new Error("draft JSON exceeds 1,000,000 UTF-8 bytes");
+        }
+        const result =
+          params.action === "catalog"
+            ? await requester(endpoint, token, "GET", "/api/proactive/concern-capabilities")
+            : await requester(
+                endpoint,
+                token,
+                "POST",
+                "/api/proactive/concern-drafts/compile",
+                params.draft,
+              );
+        const reliability = (result.observationScope as Record<string, unknown> | undefined)
+          ?.reliability as Record<string, unknown> | undefined;
+        const decorated =
+          params.action === "compile" && reliability?.testProviderOnly === true
+            ? {
+                ...result,
+                capabilityAvailability: "test_only",
+                userDisclosure: proactiveTestDisclosure,
+              }
+            : result;
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(decorated) }],
+          details: decorated,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "proactive Concern request failed";
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: message }) }],
+          details: { error: message },
+        };
+      }
+    },
+  };
+}
 
 const miniAppScopes = [
   "miniapp.data.read",
@@ -134,7 +354,7 @@ function validIdentifier(value: string): boolean {
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
+  const actual = Object.keys(value).toSorted();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
@@ -226,7 +446,7 @@ function registerDeviceEventBindingMethods(
     "flowos.deviceEventBinding.upsert",
     async ({ params, client, respond }: GatewayRequestHandlerOptions) => {
       const input = params ?? {};
-      const expected = ["gatewayDeviceId", "hubDeviceId", "subjectUserId", "tenantId"].sort();
+      const expected = ["gatewayDeviceId", "hubDeviceId", "subjectUserId", "tenantId"].toSorted();
       const gatewayDeviceId = normalizedString(input.gatewayDeviceId);
       const hubDeviceId = normalizedString(input.hubDeviceId);
       const tenantId = normalizedString(input.tenantId);
@@ -327,6 +547,13 @@ export default definePluginEntry({
   description: "Issue audience-bound five-minute user and device JWTs for FlowOS services",
   register(api) {
     const config = (api.pluginConfig ?? {}) as PluginConfig;
+    // Capture endpoint and credential at plugin startup. Agent/model tool arguments cannot
+    // select an origin or supply a credential, and node:http does not honor proxy variables.
+    const proactiveEndpoint = resolveTrustedAssistEndpoint(process.env.ASSIST_API_BASE);
+    const proactiveToken = normalizedString(process.env.PROACTIVE_AGENT_TOKEN);
+    api.registerTool(() => createProactiveConcernTool(proactiveEndpoint, proactiveToken), {
+      name: proactiveConcernToolName,
+    });
     const bindings = api.runtime.state.openKeyedStore<DeviceEventBinding>({
       namespace: bindingsNamespace,
       maxEntries: 1024,

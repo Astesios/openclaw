@@ -1,10 +1,16 @@
 import fs from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import plugin from "./index.js";
+import plugin, {
+  createProactiveConcernTool,
+  requestProactiveConcern,
+  resolveTrustedAssistEndpoint,
+} from "./index.js";
 
 const originalEnv = { ...process.env };
 const tempDirs: string[] = [];
@@ -49,10 +55,12 @@ function writeDeviceSecret(secret = "d".repeat(48), mode = 0o600): string {
 function setup(gatewayCredential?: string) {
   const records = new Map<string, StoredBinding>();
   const registerGatewayMethod = vi.fn();
+  const registerTool = vi.fn();
   plugin.register({
     pluginConfig: { userId: "alice", tenantId: "tenant-a" },
     config: { gateway: { auth: { token: gatewayCredential } } },
     registerGatewayMethod,
+    registerTool,
     runtime: {
       state: {
         openKeyedStore: () => ({
@@ -64,8 +72,119 @@ function setup(gatewayCredential?: string) {
       },
     },
   } as never);
-  return { calls: registerGatewayMethod.mock.calls, records };
+  return { calls: registerGatewayMethod.mock.calls, records, toolCalls: registerTool.mock.calls };
 }
+
+describe("proactive Concern runtime tool", () => {
+  it("allows only the native loopback and Compose Assist origins", () => {
+    expect(resolveTrustedAssistEndpoint(undefined)?.origin).toBe("http://127.0.0.1:18790");
+    expect(resolveTrustedAssistEndpoint("http://assist:18790")?.origin).toBe("http://assist:18790");
+    for (const value of [
+      "https://assist:18790",
+      "http://attacker:18790",
+      "http://127.0.0.1:8080",
+      "http://user:password@assist:18790",
+      "http://assist:18790/redirect",
+      "http://assist:18790/?target=evil",
+    ]) {
+      expect(resolveTrustedAssistEndpoint(value)).toBeNull();
+    }
+  });
+
+  it("registers a tool schema with no endpoint or credential arguments", () => {
+    process.env.ASSIST_API_BASE = "http://assist:18790";
+    process.env.PROACTIVE_AGENT_TOKEN = "runtime-owned-token";
+    const { toolCalls } = setup();
+    expect(toolCalls).toHaveLength(1);
+    const [factory, options] = toolCalls[0];
+    const tool = factory({});
+    expect(options).toEqual({ name: "proactive_concern" });
+    expect(tool.parameters).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        action: { type: "string", enum: ["catalog", "compile"] },
+        draft: { type: "object", additionalProperties: true },
+      },
+      required: ["action"],
+    });
+  });
+
+  it("uses its captured endpoint and token and decorates test-only compile results", async () => {
+    const endpoint = resolveTrustedAssistEndpoint("http://assist:18790");
+    const requester = vi.fn(async () => ({
+      concernId: "concern-1",
+      status: "PROPOSED",
+      observationScope: { reliability: { testProviderOnly: true } },
+    }));
+    const tool = createProactiveConcernTool(endpoint, "captured-token", requester);
+    process.env.ASSIST_API_BASE = "http://attacker:18790";
+    process.env.PROACTIVE_AGENT_TOKEN = "replacement-token";
+
+    const result = await tool.execute("call-1", {
+      action: "compile",
+      draft: { draftId: "stable-draft" },
+    });
+
+    expect(requester).toHaveBeenCalledWith(
+      endpoint,
+      "captured-token",
+      "POST",
+      "/api/proactive/concern-drafts/compile",
+      { draftId: "stable-draft" },
+    );
+    expect(result.details).toMatchObject({
+      concernId: "concern-1",
+      capabilityAvailability: "test_only",
+      userDisclosure: "仅为测试能力，不会执行真实监控或通知。",
+    });
+  });
+
+  it("fails closed when runtime configuration is unavailable", async () => {
+    const requester = vi.fn();
+    const tool = createProactiveConcernTool(null, "", requester);
+    const result = await tool.execute("call-1", { action: "catalog" });
+    expect(requester).not.toHaveBeenCalled();
+    expect(result.details).toEqual({ error: "proactive Concern service is not configured" });
+  });
+
+  it("uses direct HTTP and rejects redirects without forwarding the credential", async () => {
+    let requests = 0;
+    const server = createServer((request, response) => {
+      requests += 1;
+      expect(request.headers.authorization).toBe("Bearer captured-token");
+      response.writeHead(302, { location: "http://attacker.invalid/collect" });
+      response.end();
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address() as AddressInfo;
+    process.env.HTTP_PROXY = "http://attacker.invalid:8080";
+    process.env.HTTPS_PROXY = "http://attacker.invalid:8080";
+    try {
+      await expect(
+        requestProactiveConcern(
+          new URL(`http://127.0.0.1:${address.port}`),
+          "captured-token",
+          "GET",
+          "/catalog",
+        ),
+      ).rejects.toThrow("Assist returned HTTP 302");
+      expect(requests).toBe(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve();
+          }
+        });
+      });
+    }
+  });
+});
 
 function method(calls: unknown[][], name: string): GatewayMethodRegistration {
   const registration = calls.find(([registeredName]) => registeredName === name);
@@ -178,7 +297,7 @@ describe("flowos task-center auth", () => {
     const { calls } = setup();
     const [, handler] = method(calls, "flowos.proactiveToken");
     const respond = vi.fn();
-    await invoke(handler, { params: {}, client: {}, respond });
+    await invoke(handler, { params: {}, client: gatewayClient({}), respond });
     expect(respond.mock.calls[0][0]).toBe(false);
   });
 
