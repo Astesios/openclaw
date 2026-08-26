@@ -423,7 +423,7 @@ function registerUserTokenMethod(
   name: string,
   audience: string,
   scopes: readonly string[],
-  requiredScope = "operator.read",
+  requiredScope: "operator.read" | "operator.admin" = "operator.read",
   requireOperatorRole = false,
 ): void {
   api.registerGatewayMethod(
