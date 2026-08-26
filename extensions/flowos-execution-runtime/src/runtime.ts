@@ -94,7 +94,6 @@ export class FlowosExecutionRuntime {
       terminal(binding) ||
       binding.childSessionKey !== event.targetSessionKey ||
       binding.childSessionKey !== ctx.childSessionKey ||
-      binding.requesterSessionKey !== ctx.requesterSessionKey ||
       (event.runId && binding.runId !== event.runId)
     ) {
       return;

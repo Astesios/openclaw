@@ -217,7 +217,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     const binding: RunBinding = {
       executionId: "execution-1",
       attemptId: "attempt-1",
-      requesterSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:flowos-requester",
       ownerAgentId: "agent:main",
       targetAgentId: "main",
       childSessionKey: "agent:main:subagent:flowos-1",
@@ -397,7 +397,7 @@ describe("FlowOS Execution typed hooks", () => {
     };
     const hookContext = {
       childSessionKey: value.childSessionKey,
-      requesterSessionKey: value.requesterSessionKey,
+      requesterSessionKey: "agent:main:main",
     };
     await ctx.instance.subagentEnded(event, hookContext);
     await ctx.instance.subagentEnded(event, hookContext);
