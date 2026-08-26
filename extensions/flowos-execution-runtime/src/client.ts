@@ -127,7 +127,7 @@ export class FlowosExecutionClient {
 
   async detail(executionId: string): Promise<ActiveExecution> {
     return requireExecution(
-      await this.request("GET", `/api/executions/${encodeURIComponent(executionId)}`),
+      await this.request("GET", `/api/executions/writer/${encodeURIComponent(executionId)}`),
     );
   }
 

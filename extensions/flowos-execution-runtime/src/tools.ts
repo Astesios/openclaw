@@ -6,7 +6,7 @@ import type {
 } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import { childSessionKey, type RunBinding, RunBindingStore } from "./bindings.js";
-import { FlowosExecutionClient } from "./client.js";
+import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 const errorCodes = [
@@ -91,6 +91,25 @@ async function requireStageBinding(
     throw new Error("child progress capability does not match this Attempt");
   }
   return binding;
+}
+
+async function requireCurrentExecution(
+  deps: ToolDeps,
+  binding: RunBinding,
+  expectedVersion: number,
+): Promise<ActiveExecution> {
+  const detail = await deps.client.detail(binding.executionId);
+  if (
+    detail.ownerAgentId !== binding.ownerAgentId ||
+    detail.currentAttemptId !== binding.attemptId ||
+    !activeStatuses.has(detail.status)
+  ) {
+    throw new Error("FlowOS Execution is no longer active for this binding");
+  }
+  if (expectedVersion > detail.version) {
+    throw new Error("expectedVersion is newer than the current FlowOS Execution");
+  }
+  return detail;
 }
 
 function executionBinding(params: {
@@ -200,9 +219,10 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         stageLabel: string;
         progress?: number;
       };
-      await requireStageBinding(deps, params.executionId, params.attemptId);
+      const binding = await requireStageBinding(deps, params.executionId, params.attemptId);
+      const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
       const item = await deps.client.stage(params.executionId, {
-        expectedVersion: params.expectedVersion,
+        expectedVersion: current.version,
         stageKey: params.stageKey,
         stageLabel: params.stageLabel,
         ...(params.progress === undefined ? {} : { progress: params.progress }),
@@ -263,10 +283,10 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         const run = await deps.api.runtime.subagent.run({
           sessionKey: childKey,
           message:
-            `[FlowOS Execution]\nexecutionId=${params.executionId}\nattemptId=${params.attemptId}\n` +
+            `[FlowOS Execution]\nexecutionId=${params.executionId}\nattemptId=${params.attemptId}\nexpectedVersion=${detail.version}\n` +
             "Only report structured progress with flowos_execution_stage. Do not complete or fail the Execution.\n\n" +
             params.task,
-          deliver: false,
+          deliver: true,
           lightContext: true,
           lane: `flowos-execution:${params.executionId}`,
           idempotencyKey:
@@ -343,6 +363,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         throw new Error("FlowOS Execution binding not found");
       }
       requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+      const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
       const resultRef = {
         type: params.resultType,
         id: params.resultId,
@@ -358,7 +379,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           : undefined;
       const item = await deps.client.complete({
         executionId: params.executionId,
-        expectedVersion: params.expectedVersion,
+        expectedVersion: current.version,
         resultRef,
         resourceRegistration,
       });
@@ -394,8 +415,9 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         throw new Error("FlowOS Execution binding not found");
       }
       requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+      const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
       const item = await deps.client.fail(params.executionId, {
-        expectedVersion: params.expectedVersion,
+        expectedVersion: current.version,
         errorCode: params.errorCode,
         retryable: params.retryable ?? false,
       });

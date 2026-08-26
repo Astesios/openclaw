@@ -276,6 +276,12 @@ describe("FlowOS Execution plugin boundaries", () => {
     });
     const running = await store.byExecution("execution-1", "attempt-1");
     expect(running).toMatchObject({ runId: "run-1", status: "RUNNING" });
+    expect(subagent.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliver: true,
+        message: expect.stringContaining("expectedVersion=1"),
+      }),
+    );
     await owner.byName.get("flowos_execution_spawn")?.execute("spawn-replay", {
       executionId: "execution-1",
       attemptId: "attempt-1",
@@ -283,6 +289,37 @@ describe("FlowOS Execution plugin boundaries", () => {
       task: "generate result",
     });
     expect(subagent.run).toHaveBeenCalledOnce();
+  });
+
+  it("re-resolves the writer version before mutation and rejects future versions", async () => {
+    const assist = fakeClient();
+    const owner = tools({ client: assist.client });
+    await startExecution(owner.byName);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "runtime-stage",
+      stageLabel: "运行时已推进",
+    });
+    await owner.byName.get("flowos_execution_stage")?.execute("stage", {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      expectedVersion: 1,
+      stageKey: "validated",
+      stageLabel: "已按最新版本推进",
+    });
+    expect(assist.getItem()).toMatchObject({ version: 3, stageKey: "validated" });
+    const lastStage = assist.calls.findLast((call) => call.path.endsWith("/stage"));
+    expect(lastStage?.payload?.expectedVersion).toBe(2);
+
+    await expect(
+      owner.byName.get("flowos_execution_stage")?.execute("future", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 99,
+        stageKey: "future",
+        stageLabel: "错误未来版本",
+      }),
+    ).rejects.toThrow("newer than the current");
   });
 
   it("complete registers RESOURCE before atomically completing the owner Execution", async () => {
