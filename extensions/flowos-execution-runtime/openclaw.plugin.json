@@ -1,0 +1,21 @@
+{
+  "id": "flowos-execution-runtime",
+  "activation": {
+    "onStartup": false,
+    "onConfigPaths": ["plugins.entries.flowos-execution-runtime"]
+  },
+  "contracts": {
+    "tools": [
+      "flowos_execution_start",
+      "flowos_execution_stage",
+      "flowos_execution_spawn",
+      "flowos_execution_complete",
+      "flowos_execution_fail"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
