@@ -258,7 +258,7 @@ export class FlowosExecutionRuntime {
       this.system.requestHeartbeat({
         source: "background-task",
         intent: "immediate",
-        reason: "flowos-execution-ended",
+        reason: "background-task",
         sessionKey: binding.requesterSessionKey,
       });
     }

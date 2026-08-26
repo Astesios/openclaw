@@ -624,6 +624,14 @@ describe("FlowOS Execution typed hooks", () => {
       expect.objectContaining({ sessionKey: value.requesterSessionKey }),
     );
     expect(ctx.system.requestHeartbeat).toHaveBeenCalledOnce();
+    expect(ctx.system.requestHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "background-task",
+        intent: "immediate",
+        reason: "background-task",
+        sessionKey: value.requesterSessionKey,
+      }),
+    );
   });
 
   it("serializes an ended hook ahead of a late child stage", async () => {
