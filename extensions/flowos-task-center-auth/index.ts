@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
+import {
+  approveDevicePairing,
+  ensureDeviceToken,
+  getPairedDevice,
+  requestDevicePairing,
+} from "openclaw/plugin-sdk/device-bootstrap";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
@@ -416,11 +423,17 @@ function registerUserTokenMethod(
   name: string,
   audience: string,
   scopes: readonly string[],
+  requiredScope = "operator.read",
+  requireOperatorRole = false,
 ): void {
   api.registerGatewayMethod(
     name,
     async ({ params, client, respond }: GatewayRequestHandlerOptions) => {
-      if (!client?.isDeviceTokenAuth || !client.connect.device?.id) {
+      if (
+        !client?.isDeviceTokenAuth ||
+        !client.connect.device?.id ||
+        (requireOperatorRole && client.connect.role !== "operator")
+      ) {
         reject(respond, "paired device authentication required");
         return;
       }
@@ -434,7 +447,99 @@ function registerUserTokenMethod(
         respond(false, undefined, { code: "UNAVAILABLE", message: "user auth is not configured" });
       }
     },
-    { scope: "operator.read" },
+    { scope: requiredScope },
+  );
+}
+
+function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
+  api.registerGatewayMethod(
+    "flowos.deviceOnboardingProvision",
+    async ({ params, client, respond }: GatewayRequestHandlerOptions) => {
+      const input = params ?? {};
+      const deviceId = normalizedString(input.deviceId);
+      const publicKey = normalizedString(input.devicePublicKey);
+      let publicKeyBytes: Buffer;
+      try {
+        publicKeyBytes = Buffer.from(publicKey, "base64url");
+      } catch {
+        publicKeyBytes = Buffer.alloc(0);
+      }
+      if (
+        !client?.isDeviceTokenAuth ||
+        client.connect.role !== "operator" ||
+        !client.connect.device?.id
+      ) {
+        reject(respond, "paired operator device authentication required");
+        return;
+      }
+      if (
+        !hasExactKeys(input, ["deviceId", "devicePublicKey"]) ||
+        !validIdentifier(deviceId) ||
+        publicKeyBytes.length !== 32 ||
+        publicKeyBytes.toString("base64url") !== publicKey ||
+        createHash("sha256").update(publicKeyBytes).digest("hex") !== deviceId
+      ) {
+        reject(respond, "valid device identity is required");
+        return;
+      }
+      try {
+        const existing = await getPairedDevice(deviceId);
+        if (existing) {
+          if (
+            existing.publicKey !== publicKey ||
+            existing.clientId !== "gateway-client" ||
+            existing.clientMode !== "ui" ||
+            existing.deviceFamily !== "RaspberryPi"
+          ) {
+            reject(respond, "existing device identity does not match onboarding request");
+            return;
+          }
+          const token = await ensureDeviceToken({
+            deviceId,
+            role: "operator",
+            scopes: ["operator.read", "operator.write"],
+          });
+          if (!token) {
+            reject(respond, "device token is unavailable");
+            return;
+          }
+          respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
+          return;
+        }
+        const requested = await requestDevicePairing({
+          deviceId,
+          publicKey,
+          displayName: "FlowGo",
+          platform: "linux",
+          deviceFamily: "RaspberryPi",
+          clientId: "gateway-client",
+          clientMode: "ui",
+          role: "operator",
+          scopes: ["operator.read", "operator.write"],
+          silent: false,
+        });
+        const approved = await approveDevicePairing(requested.request.requestId, {
+          callerScopes: client.connect.scopes ?? [],
+        });
+        if (!approved || approved.status !== "approved") {
+          reject(respond, "device provisioning was not approved");
+          return;
+        }
+        const token = await ensureDeviceToken({
+          deviceId,
+          role: "operator",
+          scopes: ["operator.read", "operator.write"],
+        });
+        if (!token) {
+          reject(respond, "device token is unavailable");
+          return;
+        }
+        respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
+      } catch {
+        respond(false, undefined, { code: "UNAVAILABLE", message: "device provisioning failed" });
+      }
+    },
+    { scope: "operator.admin" },
   );
 }
 
@@ -560,6 +665,16 @@ export default definePluginEntry({
     });
     registerUserTokenMethod(api, config, "flowos.taskCenterToken", "assist:task-center", []);
     registerUserTokenMethod(api, config, "flowos.miniAppToken", "assist:miniapps", miniAppScopes);
+    registerUserTokenMethod(
+      api,
+      config,
+      "flowos.deviceOnboardingToken",
+      "assist:device-onboarding",
+      ["device-onboarding:confirm"],
+      "operator.admin",
+      true,
+    );
+    registerDeviceOnboardingProvisionMethod(api);
     // 主动服务(委托 / 事件入口 / 收件箱 / 入口审计)的用户主体票。
     // ★ 单独一个 audience,不复用 assist:task-center —— 凭据要按用途分域:
     //   一张任务中心的票不该顺带能拉走「这个人在关注什么、用哪些 App、什么时候在用」。
