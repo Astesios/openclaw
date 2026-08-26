@@ -10,6 +10,8 @@ type RuntimeLogger = {
   info(message: string): void;
 };
 
+type RuntimeSystem = Pick<PluginRuntime["system"], "enqueueSystemEvent" | "requestHeartbeat">;
+
 type EndedEvent = {
   targetSessionKey: string;
   targetKind: "subagent" | "acp";
@@ -59,6 +61,7 @@ export class FlowosExecutionRuntime {
     private readonly client: FlowosExecutionClient,
     private readonly bindings: RunBindingStore,
     private readonly subagent: PluginRuntime["subagent"],
+    private readonly system: RuntimeSystem,
     private readonly logger: RuntimeLogger,
     private readonly locks: ExecutionLocks,
   ) {}
@@ -73,6 +76,7 @@ export class FlowosExecutionRuntime {
     if (!found) {
       return;
     }
+    let wake: { binding: RunBinding; outcome: string; version: number } | undefined;
     await this.locks.run(found.executionId, found.attemptId, async () => {
       const binding = await this.bindings.byExecution(found.executionId, found.attemptId);
       if (
@@ -92,8 +96,14 @@ export class FlowosExecutionRuntime {
         updatedAt: Date.now(),
       };
       await this.bindings.save(pending);
-      await this.syncTerminalLocked(pending);
+      const version = await this.syncTerminalLocked(pending);
+      if (version !== null) {
+        wake = { binding: pending, outcome, version };
+      }
     });
+    if (wake) {
+      this.wakeRequester(wake.binding, wake.outcome, wake.version);
+    }
   }
 
   async reconcile(): Promise<void> {
@@ -127,7 +137,10 @@ export class FlowosExecutionRuntime {
         await this.locks.run(binding.executionId, binding.attemptId, async () => {
           const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
           if (current?.status.endsWith("_PENDING_SYNC")) {
-            await this.syncTerminalLocked(current);
+            const version = await this.syncTerminalLocked(current);
+            if (version !== null) {
+              this.wakeRequester(current, current.outcome ?? "error", version);
+            }
           }
         });
         continue;
@@ -193,24 +206,27 @@ export class FlowosExecutionRuntime {
     }
   }
 
-  private async syncTerminalLocked(binding: RunBinding): Promise<void> {
+  private async syncTerminalLocked(binding: RunBinding): Promise<number | null> {
     try {
       const detail = await latestStillNeedsSync(this.client, binding);
+      let syncedVersion = detail?.version ?? null;
       if (detail) {
         if (binding.outcome === "ok") {
           if (detail.stageKey !== "validating") {
-            await this.client.stage(binding.executionId, {
+            const validating = await this.client.stage(binding.executionId, {
               expectedVersion: detail.version,
               stageKey: "validating",
               stageLabel: "正在验证结果",
             });
+            syncedVersion = validating.version;
           }
         } else {
           const failure = errorForOutcome(binding.outcome);
-          await this.client.fail(binding.executionId, {
+          const failed = await this.client.fail(binding.executionId, {
             expectedVersion: detail.version,
             ...failure,
           });
+          syncedVersion = failed.version;
         }
       }
       await this.bindings.save({
@@ -218,10 +234,33 @@ export class FlowosExecutionRuntime {
         status: binding.outcome === "ok" ? "ENDED_OK" : "ENDED_ERROR",
         updatedAt: Date.now(),
       });
+      return syncedVersion;
     } catch (error) {
       this.logger.warn(
         `FlowOS Execution terminal sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
       );
+      return null;
+    }
+  }
+
+  private wakeRequester(binding: RunBinding, outcome: string, version: number): void {
+    const event =
+      `[FlowOS Execution]\nexecutionId=${binding.executionId}\nattemptId=${binding.attemptId}\n` +
+      `outcome=${outcome}\nversion=${version}\n` +
+      (outcome === "ok"
+        ? "The child run ended successfully. Continue the business validator and register the result before completing the Execution."
+        : "The child run ended unsuccessfully. Report the controlled failure; do not complete the Execution.");
+    const queued = this.system.enqueueSystemEvent(event, {
+      sessionKey: binding.requesterSessionKey,
+      contextKey: `flowos-execution:${binding.executionId}:${binding.attemptId}:ended`,
+    });
+    if (queued) {
+      this.system.requestHeartbeat({
+        source: "background-task",
+        intent: "immediate",
+        reason: "background-task",
+        sessionKey: binding.requesterSessionKey,
+      });
     }
   }
 }

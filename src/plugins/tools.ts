@@ -19,6 +19,7 @@ import type { PluginManifestRecord } from "./manifest-registry.js";
 import { hasManifestToolAvailability } from "./manifest-tool-availability.js";
 import type { PluginMetadataManifestView } from "./plugin-metadata-snapshot.types.js";
 import type { PluginRegistry, PluginToolRegistration } from "./registry-types.js";
+import { getActivePluginRuntimeSubagentMode } from "./runtime.js";
 import { withPluginRuntimePluginScope } from "./runtime/gateway-request-scope.js";
 import {
   buildPluginRuntimeLoadOptions,
@@ -906,6 +907,24 @@ function resolvePluginToolRegistry(params: {
     workspaceDir: params.loadOptions.workspaceDir,
     requiredPluginIds: params.onlyPluginIds,
   };
+  // A gateway-bound tool must prefer the runtime-mode-compatible active registry.
+  // Pinned channel registries intentionally survive provider/runtime swaps, but they
+  // do not carry their own subagent mode metadata and may expose request-unavailable
+  // plugin runtime helpers to an agent tool execution.
+  if (
+    params.loadOptions.runtimeOptions?.allowGatewaySubagentBinding === true &&
+    getActivePluginRuntimeSubagentMode() === "gateway-bindable"
+  ) {
+    const compatibleActiveRegistry = getLoadedRuntimePluginRegistry({
+      env: lookup.env,
+      workspaceDir: lookup.workspaceDir,
+      requiredPluginIds: lookup.requiredPluginIds,
+      surface: "active",
+    });
+    if (registryHasScopedPluginTools(compatibleActiveRegistry, params.onlyPluginIds)) {
+      return compatibleActiveRegistry;
+    }
+  }
   const channelRegistry = getLoadedRuntimePluginRegistry({
     ...lookup,
     surface: "channel",

@@ -11,6 +11,7 @@ import { childSessionKey, type RunBinding, RunBindingStore } from "./bindings.js
 import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
 import { FlowosExecutionRuntime } from "./runtime.js";
+import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 const errorCodes = [
@@ -34,6 +35,11 @@ type ToolDeps = {
   locks: ExecutionLocks;
   runtime: FlowosExecutionRuntime;
   ownerAgentId: string;
+  validateArtifact: (params: {
+    spaceId: string;
+    filePath: string;
+    artifactType: "html" | "markdown";
+  }) => Promise<SpaceArtifactValidation>;
 };
 
 function requireSession(context: OpenClawPluginToolContext): string {
@@ -133,6 +139,11 @@ function stableRunId(executionId: string, attemptId: string, agentId: string): s
   return `flowos-run:${digest}`;
 }
 
+function stableTaskId(spaceId: string, idempotencyKey: string): string {
+  const digest = createHash("sha256").update(`${spaceId}\0${idempotencyKey}`).digest("hex");
+  return `task-flowos-${digest.slice(0, 24)}`;
+}
+
 function executionBinding(params: {
   executionId: string;
   attemptId: string;
@@ -162,10 +173,6 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         title: Type.String({ minLength: 1, maxLength: 120 }),
         idempotencyKey: Type.String({ minLength: 1, maxLength: 160 }),
         spaceId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-        taskId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-        surfaceKind: Type.Optional(
-          Type.Union([Type.Literal("AI_TASK"), Type.Literal("DELIVERY"), Type.Literal("TAKEOUT")]),
-        ),
         visibilityPolicy: Type.Optional(
           Type.Union([Type.Literal("DEFAULT"), Type.Literal("SUPPRESS_ISLAND_WHILE_CALL_ACTIVE")]),
         ),
@@ -179,12 +186,16 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         title: string;
         idempotencyKey: string;
         spaceId?: string;
-        taskId?: string;
-        surfaceKind?: "AI_TASK" | "DELIVERY" | "TAKEOUT";
         visibilityPolicy?: "DEFAULT" | "SUPPRESS_ISLAND_WHILE_CALL_ACTIVE";
       };
       const requesterSessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
       const idempotencyKey = scopedIdempotencyKey(requesterSessionKey, params.idempotencyKey);
+      if (params.source === "SPACE_TASK" && !params.spaceId) {
+        throw new Error("SPACE_TASK execution requires spaceId");
+      }
+      if (params.source === "USER" && params.spaceId) {
+        throw new Error("USER execution cannot carry spaceId");
+      }
       return await deps.locks.run("start", idempotencyKey, async () => {
         const item = await deps.client.create({
           source: params.source,
@@ -192,10 +203,10 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           title: params.title,
           idempotencyKey,
           ownerAgentId: deps.ownerAgentId,
-          surfaceKind: params.surfaceKind ?? "AI_TASK",
+          surfaceKind: "AI_TASK",
           visibilityPolicy: params.visibilityPolicy ?? "DEFAULT",
           ...(params.spaceId ? { spaceId: params.spaceId } : {}),
-          ...(params.taskId ? { taskId: params.taskId } : {}),
+          ...(params.spaceId ? { taskId: stableTaskId(params.spaceId, idempotencyKey) } : {}),
         });
         const attemptId = item.currentAttemptId;
         if (!attemptId) {
@@ -377,24 +388,17 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
     name: "flowos_execution_complete",
     label: "FlowOS Execution Complete",
     description:
-      "Complete the owner session Execution only after registering one controlled result reference.",
+      "Register one validated generated Space Artifact and complete the owner Execution.",
     executionMode: "sequential",
     parameters: Type.Object(
       {
         executionId: Type.String({ minLength: 1, maxLength: 128 }),
         attemptId: Type.String({ minLength: 1, maxLength: 128 }),
         expectedVersion: Type.Integer({ minimum: 1 }),
-        resultType: Type.Union([
-          Type.Literal("CASE_DETAIL"),
-          Type.Literal("SPACE_ARTIFACT"),
-          Type.Literal("RESOURCE"),
-        ]),
-        resultId: Type.String({ minLength: 1, maxLength: 128 }),
-        spaceId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-        resourceKind: Type.Optional(
-          Type.Union([Type.Literal("GENERIC"), Type.Literal("CODING_JOB")]),
-        ),
-        backingId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+        spaceId: Type.String({ minLength: 1, maxLength: 128 }),
+        artifactTitle: Type.String({ minLength: 1, maxLength: 160 }),
+        artifactFilePath: Type.String({ minLength: 1, maxLength: 512 }),
+        artifactType: Type.Union([Type.Literal("html"), Type.Literal("markdown")]),
       },
       { additionalProperties: false },
     ),
@@ -403,11 +407,10 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         executionId: string;
         attemptId: string;
         expectedVersion: number;
-        resultType: "CASE_DETAIL" | "SPACE_ARTIFACT" | "RESOURCE";
-        resultId: string;
-        spaceId?: string;
-        resourceKind?: "GENERIC" | "CODING_JOB";
-        backingId?: string;
+        spaceId: string;
+        artifactTitle: string;
+        artifactFilePath: string;
+        artifactType: "html" | "markdown";
       };
       return await deps.locks.run(params.executionId, params.attemptId, async () => {
         const sessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
@@ -416,28 +419,33 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
-        if (binding.targetAgentId && binding.status !== "ENDED_OK") {
+        if (!binding.targetAgentId || binding.status !== "ENDED_OK") {
           throw new Error("FlowOS Execution child run has not ended successfully");
         }
         const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
-        const resultRef = {
-          type: params.resultType,
-          id: params.resultId,
-          ...(params.spaceId ? { spaceId: params.spaceId } : {}),
-        };
-        const resourceRegistration =
-          params.resultType === "RESOURCE"
-            ? {
-                resourceId: params.resultId,
-                resourceKind: params.resourceKind ?? "GENERIC",
-                ...(params.backingId ? { backingId: params.backingId } : {}),
-              }
-            : undefined;
+        if (current.spaceId !== params.spaceId) {
+          throw new Error("Space Artifact does not match the bound Execution space");
+        }
+        if (current.stageKey !== "validating") {
+          throw new Error("FlowOS Execution is not in the validating stage");
+        }
+        const validation = await deps.validateArtifact({
+          spaceId: params.spaceId,
+          filePath: params.artifactFilePath,
+          artifactType: params.artifactType,
+        });
+        const resultRef = await deps.client.registerSpaceArtifact(params.executionId, {
+          attemptId: params.attemptId,
+          expectedVersion: current.version,
+          title: params.artifactTitle,
+          filePath: params.artifactFilePath,
+          artifactType: params.artifactType,
+          ...validation,
+        });
         const item = await deps.client.complete({
           executionId: params.executionId,
           expectedVersion: current.version,
           resultRef,
-          resourceRegistration,
         });
         return jsonResult(item);
       });

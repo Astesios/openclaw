@@ -9,6 +9,7 @@ import plugin, {
 } from "./index.js";
 import { RunBindingStore, type RunBinding } from "./src/bindings.js";
 import {
+  type ActiveExecution,
   FlowosExecutionClient,
   resolveTrustedAssistEndpoint,
   type AssistRequest,
@@ -16,6 +17,7 @@ import {
 import { ExecutionLocks } from "./src/locks.js";
 import { FlowosExecutionRuntime } from "./src/runtime.js";
 import { createFlowosExecutionTools } from "./src/tools.js";
+import type { SpaceArtifactValidation } from "./src/validation.js";
 
 const originalEnv = { ...process.env };
 
@@ -74,7 +76,7 @@ function fakeClient(options?: {
   ) => Promise<void> | void;
 }) {
   const calls: Array<{ method: string; path: string; payload?: Record<string, unknown> }> = [];
-  let item = {
+  let item: ActiveExecution = {
     executionId: "execution-1",
     currentAttemptId: "attempt-1",
     ownerAgentId: "agent:main",
@@ -87,6 +89,21 @@ function fakeClient(options?: {
     calls.push({ method, path, payload });
     if (method === "GET") {
       return item;
+    }
+    if (path === "/api/executions") {
+      item = {
+        ...item,
+        spaceId: typeof payload?.spaceId === "string" ? payload.spaceId : null,
+        taskId: typeof payload?.taskId === "string" ? payload.taskId : null,
+      };
+      return item;
+    }
+    if (path.endsWith("/space-artifacts")) {
+      return {
+        type: "SPACE_ARTIFACT",
+        id: "art-flowos-1",
+        spaceId: item.spaceId ?? "",
+      };
     }
     if (path.endsWith("/stage")) {
       item = {
@@ -121,17 +138,33 @@ function fakeSubagent() {
   };
 }
 
+function fakeSystem() {
+  return {
+    enqueueSystemEvent: vi.fn(() => true),
+    requestHeartbeat: vi.fn(),
+  };
+}
+
+type ArtifactValidator = (params: {
+  spaceId: string;
+  filePath: string;
+  artifactType: "html" | "markdown";
+}) => Promise<SpaceArtifactValidation>;
+
 function tools(params?: {
   context?: { agentId?: string; sessionKey?: string };
   client?: FlowosExecutionClient;
   bindings?: RunBindingStore;
   subagent?: ReturnType<typeof fakeSubagent>;
+  system?: ReturnType<typeof fakeSystem>;
   locks?: ExecutionLocks;
   runtime?: FlowosExecutionRuntime;
+  validateArtifact?: ArtifactValidator;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
   const subagent = params?.subagent ?? fakeSubagent();
+  const system = params?.system ?? fakeSystem();
   const locks = params?.locks ?? new ExecutionLocks();
   const runtime =
     params?.runtime ??
@@ -139,9 +172,16 @@ function tools(params?: {
       assist.client,
       bindings,
       subagent as never,
+      system as never,
       { warn: vi.fn(), info: vi.fn() },
       locks,
     );
+  const validateArtifact =
+    params?.validateArtifact ??
+    vi.fn<ArtifactValidator>(async () => ({
+      validatorId: "lushu-html-v1" as const,
+      contentSha256: "a".repeat(64),
+    }));
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
     context: params?.context ?? { agentId: "main", sessionKey: "agent:main:main" },
@@ -150,14 +190,32 @@ function tools(params?: {
     locks,
     runtime,
     ownerAgentId: "agent:main",
+    validateArtifact,
   });
   return {
     byName: new Map(created.map((tool) => [tool.name, tool])),
     bindings,
     subagent,
+    system,
     locks,
     runtime,
+    validateArtifact,
   };
+}
+
+async function markChildEndedOk(owner: ReturnType<typeof tools>) {
+  await owner.bindings.save({
+    executionId: "execution-1",
+    attemptId: "attempt-1",
+    requesterSessionKey: "agent:main:main",
+    ownerAgentId: "agent:main",
+    targetAgentId: "worker",
+    childSessionKey: "agent:worker:subagent:flowos-1",
+    runId: "run-1",
+    status: "ENDED_OK",
+    createdAt: 1,
+    updatedAt: 1,
+  });
 }
 
 async function startExecution(byName: Map<string, AnyAgentTool>) {
@@ -166,6 +224,16 @@ async function startExecution(byName: Map<string, AnyAgentTool>) {
     taskKind: "lushu",
     title: "生成路书",
     idempotencyKey: "request-1",
+  });
+}
+
+async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
+  await byName.get("flowos_execution_start")?.execute("start", {
+    source: "SPACE_TASK",
+    taskKind: "lushu",
+    title: "生成路书",
+    idempotencyKey: "request-space-1",
+    spaceId: "sp-trip",
   });
 }
 
@@ -214,7 +282,11 @@ describe("FlowOS Execution plugin boundaries", () => {
     delete process.env.LONG_TASK_EXECUTION_AGENT_ID;
     const registerTool = vi.fn();
     plugin.register({
-      runtime: { state: { openKeyedStore: () => memoryStore() }, subagent: fakeSubagent() },
+      runtime: {
+        state: { openKeyedStore: () => memoryStore() },
+        subagent: fakeSubagent(),
+        system: fakeSystem(),
+      },
       registerTool,
       on: vi.fn(),
       logger: { warn: vi.fn(), info: vi.fn() },
@@ -277,6 +349,22 @@ describe("FlowOS Execution plugin boundaries", () => {
       .map((call) => call.payload?.idempotencyKey);
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("derives Space task identity and trusted AI surface outside the model schema", async () => {
+    const assist = fakeClient();
+    const owner = tools({ client: assist.client });
+    await startSpaceExecution(owner.byName);
+    const create = assist.calls.find((call) => call.path === "/api/executions");
+    expect(create?.payload).toMatchObject({
+      source: "SPACE_TASK",
+      spaceId: "sp-trip",
+      surfaceKind: "AI_TASK",
+    });
+    expect(create?.payload?.taskId).toMatch(/^task-flowos-[a-f0-9]{24}$/);
+    const schema = JSON.stringify(owner.byName.get("flowos_execution_start")?.parameters);
+    expect(schema).not.toContain("taskId");
+    expect(schema).not.toContain("surfaceKind");
   });
 
   it("persists one canonical active binding without expiring aliases", async () => {
@@ -344,8 +432,10 @@ describe("FlowOS Execution plugin boundaries", () => {
         executionId: "execution-1",
         attemptId: "attempt-1",
         expectedVersion: 2,
-        resultType: "RESOURCE",
-        resultId: "resource-1",
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
       }),
     ).rejects.toThrow("owner tool is unavailable");
   });
@@ -437,10 +527,29 @@ describe("FlowOS Execution plugin boundaries", () => {
         executionId: "execution-1",
         attemptId: "attempt-1",
         expectedVersion: 1,
-        resultType: "RESOURCE",
-        resultId: "resource-1",
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
       }),
     ).rejects.toThrow("has not ended successfully");
+  });
+
+  it("rejects completion without an accepted child even when a file is claimed", async () => {
+    const owner = tools();
+    await startSpaceExecution(owner.byName);
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 1,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+      }),
+    ).rejects.toThrow("has not ended successfully");
+    expect(owner.validateArtifact).not.toHaveBeenCalled();
   });
 
   it("rejects stale and future writer versions without changing state", async () => {
@@ -475,21 +584,39 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "runtime-stage" });
   });
 
-  it("complete registers RESOURCE before atomically completing the owner Execution", async () => {
+  it("complete registers the bound Space Artifact before completing the owner Execution", async () => {
     const assist = fakeClient();
     const owner = tools({ client: assist.client });
-    await startExecution(owner.byName);
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
     await owner.byName.get("flowos_execution_complete")?.execute("complete", {
       executionId: "execution-1",
       attemptId: "attempt-1",
-      expectedVersion: 1,
-      resultType: "RESOURCE",
-      resultId: "resource-1",
+      expectedVersion: 2,
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      artifactType: "html",
     });
     const paths = assist.calls.map((call) => call.path);
-    expect(paths.indexOf("/api/executions/execution-1/resources")).toBeLessThan(
+    expect(paths.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
       paths.indexOf("/api/executions/execution-1/complete"),
     );
+    expect(owner.validateArtifact).toHaveBeenCalledOnce();
+    const registration = assist.calls.find((call) => call.path.endsWith("/space-artifacts"));
+    expect(registration?.payload).toMatchObject({
+      validatorId: "lushu-html-v1",
+      contentSha256: "a".repeat(64),
+    });
+    const schema = JSON.stringify(owner.byName.get("flowos_execution_complete")?.parameters);
+    expect(schema).not.toContain("resultId");
+    expect(schema).not.toContain("RESOURCE");
+    expect(schema).not.toContain("CASE_DETAIL");
   });
 });
 
@@ -498,15 +625,18 @@ describe("FlowOS Execution typed hooks", () => {
     const assist = fakeClient();
     const bindings = new RunBindingStore(memoryStore());
     const subagent = fakeSubagent();
+    const system = fakeSystem();
     const logger = { warn: vi.fn(), info: vi.fn() };
     return {
       assist,
       bindings,
       subagent,
+      system,
       instance: new FlowosExecutionRuntime(
         assist.client,
         bindings,
         subagent as never,
+        system as never,
         logger,
         new ExecutionLocks(),
       ),
@@ -548,6 +678,20 @@ describe("FlowOS Execution typed hooks", () => {
     expect(ctx.assist.getItem()).toMatchObject({ status: "RUNNING", stageKey: "validating" });
     expect(ctx.assist.calls.filter((call) => call.path.endsWith("/stage"))).toHaveLength(1);
     expect(ctx.assist.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);
+    expect(ctx.system.enqueueSystemEvent).toHaveBeenCalledOnce();
+    expect(ctx.system.enqueueSystemEvent).toHaveBeenCalledWith(
+      expect.stringContaining("version=2"),
+      expect.objectContaining({ sessionKey: value.requesterSessionKey }),
+    );
+    expect(ctx.system.requestHeartbeat).toHaveBeenCalledOnce();
+    expect(ctx.system.requestHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "background-task",
+        intent: "immediate",
+        reason: "background-task",
+        sessionKey: value.requesterSessionKey,
+      }),
+    );
   });
 
   it("serializes an ended hook ahead of a late child stage", async () => {
@@ -627,10 +771,12 @@ describe("FlowOS Execution typed hooks", () => {
     const assist = fakeClient();
     const bindings = new RunBindingStore(flakyStore);
     const subagent = fakeSubagent();
+    const system = fakeSystem();
     const executionRuntime = new FlowosExecutionRuntime(
       assist.client,
       bindings,
       subagent as never,
+      system as never,
       { warn: vi.fn(), info: vi.fn() },
       new ExecutionLocks(),
     );
@@ -653,6 +799,8 @@ describe("FlowOS Execution typed hooks", () => {
     expect(await bindings.byRun("run-1")).toMatchObject({ status: "ENDED_OK" });
     expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "validating" });
     expect(assist.calls.filter((call) => call.path.endsWith("/stage"))).toHaveLength(1);
+    expect(system.enqueueSystemEvent).toHaveBeenCalledOnce();
+    expect(system.requestHeartbeat).toHaveBeenCalledOnce();
   });
 
   it("reconciles a deferred spawn failure to a terminal Execution", async () => {

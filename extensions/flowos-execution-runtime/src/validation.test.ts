@@ -1,0 +1,70 @@
+import { createHash } from "node:crypto";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { validateSpaceArtifact } from "./validation.js";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function fixture(content = "<html>validated</html>") {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "flowos-artifact-validator-"));
+  roots.push(workspaceDir);
+  const generated = join(workspaceDir, "spaces", "sp-trip", "generated");
+  const scripts = join(workspaceDir, "skills", "lushu", "scripts");
+  mkdirSync(generated, { recursive: true });
+  mkdirSync(scripts, { recursive: true });
+  writeFileSync(join(generated, "lushu.html"), content);
+  writeFileSync(join(scripts, "validate-lushu.sh"), "#!/usr/bin/env bash\nexit 0\n");
+  return { workspaceDir, content };
+}
+
+describe("trusted Space Artifact validator", () => {
+  it("binds a successful routebook validator run to the exact content digest", async () => {
+    const { workspaceDir, content } = fixture();
+    const runCommandWithTimeout = vi.fn(async () => ({ code: 0 }));
+
+    const result = await validateSpaceArtifact({
+      runtime: { system: { runCommandWithTimeout } } as never,
+      workspaceDir,
+      spaceId: "sp-trip",
+      filePath: "generated/lushu.html",
+      artifactType: "html",
+    });
+
+    expect(result).toEqual({
+      validatorId: "lushu-html-v1",
+      contentSha256: createHash("sha256").update(content).digest("hex"),
+    });
+    expect(runCommandWithTimeout).toHaveBeenCalledWith(
+      [
+        "bash",
+        join(workspaceDir, "skills", "lushu", "scripts", "validate-lushu.sh"),
+        join(workspaceDir, "spaces", "sp-trip", "generated", "lushu.html"),
+      ],
+      expect.objectContaining({ cwd: workspaceDir, timeoutMs: 120_000 }),
+    );
+  });
+
+  it("rejects a non-zero routebook validator result", async () => {
+    const { workspaceDir } = fixture();
+
+    await expect(
+      validateSpaceArtifact({
+        runtime: {
+          system: { runCommandWithTimeout: vi.fn(async () => ({ code: 1 })) },
+        } as never,
+        workspaceDir,
+        spaceId: "sp-trip",
+        filePath: "generated/lushu.html",
+        artifactType: "html",
+      }),
+    ).rejects.toThrow("validator rejected");
+  });
+});

@@ -8,10 +8,18 @@ export type ActiveExecution = {
   executionId: string;
   currentAttemptId?: string | null;
   ownerAgentId?: string | null;
+  spaceId?: string | null;
+  taskId?: string | null;
   status: string;
   version: number;
   stageKey: string;
   resultRef?: { type: string; id: string; spaceId?: string | null } | null;
+};
+
+export type SpaceArtifactRef = {
+  type: "SPACE_ARTIFACT";
+  id: string;
+  spaceId: string;
 };
 
 export type AssistRequest = (
@@ -118,6 +126,17 @@ function requireExecution(value: Record<string, unknown>): ActiveExecution {
   return value as ActiveExecution;
 }
 
+function requireSpaceArtifactRef(value: Record<string, unknown>): SpaceArtifactRef {
+  if (
+    value.type !== "SPACE_ARTIFACT" ||
+    typeof value.id !== "string" ||
+    typeof value.spaceId !== "string"
+  ) {
+    throw new Error("Assist returned an invalid Space Artifact reference");
+  }
+  return value as SpaceArtifactRef;
+}
+
 export class FlowosExecutionClient {
   constructor(private readonly request: AssistRequest) {}
 
@@ -145,20 +164,25 @@ export class FlowosExecutionClient {
     executionId: string;
     expectedVersion: number;
     resultRef: Record<string, unknown>;
-    resourceRegistration?: Record<string, unknown>;
   }): Promise<ActiveExecution> {
-    if (params.resourceRegistration) {
-      await this.request(
-        "POST",
-        `/api/executions/${encodeURIComponent(params.executionId)}/resources`,
-        params.resourceRegistration,
-      );
-    }
     return requireExecution(
       await this.request(
         "POST",
         `/api/executions/${encodeURIComponent(params.executionId)}/complete`,
         { expectedVersion: params.expectedVersion, resultRef: params.resultRef },
+      ),
+    );
+  }
+
+  async registerSpaceArtifact(
+    executionId: string,
+    payload: Record<string, unknown>,
+  ): Promise<SpaceArtifactRef> {
+    return requireSpaceArtifactRef(
+      await this.request(
+        "POST",
+        `/api/executions/${encodeURIComponent(executionId)}/space-artifacts`,
+        payload,
       ),
     );
   }

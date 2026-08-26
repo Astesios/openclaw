@@ -94,90 +94,6 @@ export default definePluginEntry({
 
     api.registerTool(
       (ctx) => ({
-        name: "notify_live",
-        label: "实况窗通知",
-        description:
-          "通知 Celia 客户端显示或关闭实况窗。spawn subagent 前调 type=start，收到 announce 后调 type=done。",
-        parameters: {
-          type: "object",
-          properties: {
-            type: {
-              type: "string",
-              enum: ["start", "done"],
-              description: "start：弹出实况窗；done：关闭实况窗",
-            },
-            runId: {
-              type: "string",
-              description: "subagent 的 runId，用于匹配 start/done",
-            },
-            title: {
-              type: "string",
-              description: "实况窗标题，type=start 时必填",
-            },
-            icon: {
-              type: "string",
-              description: "实况窗图标 key，type=start 时填；见 TOOLS.md 可用 key 列表",
-            },
-            success: {
-              type: "boolean",
-              description: "任务是否成功，type=done 时使用，默认 true",
-            },
-            resource: {
-              type: "object",
-              description:
-                "type=done 且任务产出了文件时填写，客户端用于实况窗【查看】按钮直接跳转，无需等待 push_card",
-              properties: {
-                spaceId: { type: "string", description: "空间 ID，如 sp_xxx" },
-                filePath: {
-                  type: "string",
-                  description: "文件在空间内的相对路径，如 generated/路书.html",
-                },
-                title: { type: "string", description: "文件标题" },
-              },
-              required: ["spaceId", "filePath", "title"],
-            },
-          },
-          required: ["type", "runId"],
-        },
-        async execute(
-          _toolCallId: string,
-          params: {
-            type: "start" | "done";
-            runId: string;
-            title?: string;
-            icon?: string;
-            success?: boolean;
-            resource?: { spaceId: string; filePath: string; title: string };
-          },
-        ) {
-          const nodeSend = getNodeSend();
-          if (nodeSend) {
-            const command = params.type === "start" ? "canvas.live.start" : "canvas.live.done";
-            const payload =
-              params.type === "start"
-                ? {
-                    runId: params.runId,
-                    title: params.title ?? "任务进行中",
-                    icon: params.icon ?? "",
-                  }
-                : {
-                    runId: params.runId,
-                    success: params.success !== false,
-                    resource: params.resource ?? null,
-                  };
-            nodeSend(toNodeSessionKey(ctx.sessionKey), command, payload);
-          }
-          return {
-            content: [{ type: "text" as const, text: JSON.stringify({ ok: true }) }],
-            details: { ok: true },
-          };
-        },
-      }),
-      { name: "notify_live" },
-    );
-
-    api.registerTool(
-      (ctx) => ({
         name: "push_card",
         label: "推送卡片",
         description:
@@ -230,18 +146,25 @@ export default definePluginEntry({
             const fbCardJson = cardJson;
             setTimeout(() => {
               const stillStaged = stagedCardsByToolCallId.get(fbToolCallId);
-              if (!stillStaged) return; // 已被 llm_output 按 anchor flush
-              if (llmOutputSeenBySession.get(fbKey)) return; // 发钩子的 runtime：交给正常流程（orphan 等下个 text anchor）
+              if (!stillStaged) {
+                return; // 已被 llm_output 按 anchor flush
+              }
+              if (llmOutputSeenBySession.get(fbKey)) {
+                return; // 发钩子的 runtime：交给正常流程（orphan 等下个 text anchor）
+              }
               // 本 session 从未见过 llm_output → 不发钩子的 runtime，就地无 anchor 投递
               stagedCardsByToolCallId.delete(fbToolCallId);
-              const orphans = orphanedCardsBySession.get(fbKey);
-              if (orphans) {
-                const idx = orphans.indexOf(stillStaged);
-                if (idx >= 0) orphans.splice(idx, 1);
+              const pendingOrphans = orphanedCardsBySession.get(fbKey);
+              if (pendingOrphans) {
+                const idx = pendingOrphans.indexOf(stillStaged);
+                if (idx >= 0) {
+                  pendingOrphans.splice(idx, 1);
+                }
               }
               const nodeSend = getNodeSend();
-              if (nodeSend)
+              if (nodeSend) {
                 nodeSend(toNodeSessionKey(fbKey), "canvas.card.push", { cardJson: fbCardJson });
+              }
               void injectMessageBySessionKey(fbKey, `[celia_card]${fbCardJson}`).catch((err) => {
                 api.logger.error(`[celia-canvas] fallback inject failed: ${String(err)}`);
               });
