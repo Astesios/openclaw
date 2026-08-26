@@ -90,7 +90,14 @@ export default definePluginEntry({
       endpoint && token ? new FlowosExecutionClient(createAssistRequest(endpoint, token)) : null;
     const runtime =
       client && ownerAgentId
-        ? new FlowosExecutionRuntime(client, bindings, api.runtime.subagent, api.logger, locks)
+        ? new FlowosExecutionRuntime(
+            client,
+            bindings,
+            api.runtime.subagent,
+            api.runtime.system,
+            api.logger,
+            locks,
+          )
         : null;
 
     api.registerTool(
