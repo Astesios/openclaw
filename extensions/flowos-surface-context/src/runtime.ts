@@ -5,10 +5,34 @@ import type { SurfaceContextBinding, SurfaceContextBrief } from "./client.js";
 import { SurfaceContextClient } from "./client.js";
 
 const maxBindings = 1024;
+const runtimeStateSymbol = Symbol.for("openclaw.flowosSurfaceContextRuntimeState");
 
 type ActiveBinding = SurfaceContextBinding & {
   expiresAtMs: number;
 };
+
+export type SurfaceContextRuntimeState = {
+  bindings: Map<string, ActiveBinding>;
+  generations: Map<string, number>;
+};
+
+export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
+  return { bindings: new Map(), generations: new Map() };
+}
+
+export function sharedSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
+  const root = globalThis as typeof globalThis & {
+    [runtimeStateSymbol]?: SurfaceContextRuntimeState;
+  };
+  return (root[runtimeStateSymbol] ??= createSurfaceContextRuntimeState());
+}
+
+export function clearSharedSurfaceContextRuntimeStateForTest(): void {
+  const root = globalThis as typeof globalThis & {
+    [runtimeStateSymbol]?: SurfaceContextRuntimeState;
+  };
+  delete root[runtimeStateSymbol];
+}
 
 function defaultAgentId(config: {
   agents?: { list?: Array<{ id?: string; default?: boolean }> };
@@ -45,18 +69,16 @@ export function canonicalSessionKey(
 }
 
 export class SurfaceContextRuntime {
-  private readonly bindings = new Map<string, ActiveBinding>();
-  private readonly generations = new Map<string, number>();
-
   constructor(
     private readonly client: SurfaceContextClient,
     private readonly config: Parameters<typeof canonicalSessionKey>[0],
     private readonly now: () => number = Date.now,
+    private readonly state: SurfaceContextRuntimeState = createSurfaceContextRuntimeState(),
   ) {}
 
   private bump(sessionKey: string): number {
-    const generation = (this.generations.get(sessionKey) ?? 0) + 1;
-    this.generations.set(sessionKey, generation);
+    const generation = (this.state.generations.get(sessionKey) ?? 0) + 1;
+    this.state.generations.set(sessionKey, generation);
     return generation;
   }
 
@@ -67,25 +89,25 @@ export class SurfaceContextRuntime {
     }
     const generation = this.bump(sessionKey);
     const binding = await this.client.consume(contextRef, rawSessionKey);
-    if (this.generations.get(sessionKey) !== generation) {
+    if (this.state.generations.get(sessionKey) !== generation) {
       throw new Error("CONTEXT_STALE_BIND");
     }
     const expiresAtMs = Date.parse(binding.expiresAt);
     if (!Number.isFinite(expiresAtMs) || expiresAtMs <= this.now()) {
       throw new Error("CONTEXT_EXPIRED");
     }
-    if (!this.bindings.has(sessionKey) && this.bindings.size >= maxBindings) {
+    if (!this.state.bindings.has(sessionKey) && this.state.bindings.size >= maxBindings) {
       throw new Error("CONTEXT_BINDING_LIMIT_REACHED");
     }
     const active = { ...binding, expiresAtMs };
-    this.bindings.set(sessionKey, active);
+    this.state.bindings.set(sessionKey, active);
     return active;
   }
 
   clear(rawSessionKey: string): boolean {
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
     this.bump(sessionKey);
-    return this.bindings.delete(sessionKey);
+    return this.state.bindings.delete(sessionKey);
   }
 
   active(rawSessionKey: string | undefined): ActiveBinding | undefined {
@@ -93,12 +115,12 @@ export class SurfaceContextRuntime {
       return undefined;
     }
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
-    const binding = this.bindings.get(sessionKey);
+    const binding = this.state.bindings.get(sessionKey);
     if (!binding) {
       return undefined;
     }
     if (binding.expiresAtMs <= this.now()) {
-      this.bindings.delete(sessionKey);
+      this.state.bindings.delete(sessionKey);
       return undefined;
     }
     return binding;

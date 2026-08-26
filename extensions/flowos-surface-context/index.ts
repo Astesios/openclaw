@@ -12,6 +12,7 @@ import {
   buildPromptContext,
   canonicalSessionKey,
   createSurfaceContextTools,
+  sharedSurfaceContextRuntimeState,
   SurfaceContextRuntime,
 } from "./src/runtime.js";
 
@@ -49,7 +50,12 @@ export default definePluginEntry({
     const token = consumeRuntimeToken();
     const runtime =
       endpoint && token
-        ? new SurfaceContextRuntime(new SurfaceContextClient(endpoint, token), api.config)
+        ? new SurfaceContextRuntime(
+            new SurfaceContextClient(endpoint, token),
+            api.config,
+            Date.now,
+            sharedSurfaceContextRuntimeState(),
+          )
         : null;
 
     api.registerGatewayMethod(

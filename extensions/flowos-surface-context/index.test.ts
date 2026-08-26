@@ -18,6 +18,7 @@ import {
   type SurfaceContextBinding,
 } from "./src/client.js";
 import { createSurfaceContextTools } from "./src/runtime.js";
+import { createSurfaceContextRuntimeState } from "./src/runtime.js";
 
 const originalEnv = { ...process.env };
 const tempDirs: string[] = [];
@@ -202,6 +203,25 @@ describe("session-bound runtime", () => {
     expect(runtime.active("agent:main:other")).toBeUndefined();
     expect(runtime.clear("main")).toBe(true);
     expect(runtime.active("agent:main:main")).toBeUndefined();
+  });
+
+  it("shares process-memory bindings across Gateway and Agent plugin registries", async () => {
+    const state = createSurfaceContextRuntimeState();
+    const consume = vi.fn(async () => binding());
+    const gatewayRuntime = new SurfaceContextRuntime(
+      { consume } as unknown as SurfaceContextClient,
+      { agents: { list: [{ id: "main", default: true }] } },
+      Date.now,
+      state,
+    );
+    const agentRuntime = new SurfaceContextRuntime(
+      { consume } as unknown as SurfaceContextClient,
+      { agents: { list: [{ id: "main", default: true }] } },
+      Date.now,
+      state,
+    );
+    await gatewayRuntime.bind("session_123", "ref");
+    expect(agentRuntime.active("agent:main:session_123")?.context.spaceId).toBe("sp_trip");
   });
 
   it("does not let an older async bind overwrite a newer clear", async () => {
