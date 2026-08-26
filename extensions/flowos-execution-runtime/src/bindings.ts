@@ -1,0 +1,113 @@
+import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+
+export type RunBindingStatus =
+  | "CREATED"
+  | "STARTING"
+  | "RUNNING"
+  | "ENDED_OK_PENDING_SYNC"
+  | "ENDED_ERROR_PENDING_SYNC"
+  | "ENDED_OK"
+  | "ENDED_ERROR"
+  | "SPAWN_FAILED_PENDING_SYNC"
+  | "SPAWN_FAILED";
+
+export type RunBinding = {
+  executionId: string;
+  attemptId: string;
+  requesterSessionKey: string;
+  ownerAgentId: string;
+  targetAgentId?: string;
+  childSessionKey?: string;
+  runId?: string;
+  status: RunBindingStatus;
+  outcome?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+const terminalBindingTtlMs = 6 * 60 * 60 * 1_000;
+
+function isTerminalBinding(status: RunBindingStatus): boolean {
+  return status === "ENDED_OK" || status === "ENDED_ERROR" || status === "SPAWN_FAILED";
+}
+
+export class RunBindingStore {
+  constructor(private readonly store: PluginStateKeyedStore<RunBinding>) {}
+
+  async byExecution(executionId: string, attemptId: string): Promise<RunBinding | undefined> {
+    return await this.store.lookup(this.executionKey(executionId, attemptId));
+  }
+
+  async byChild(sessionKey: string): Promise<RunBinding | undefined> {
+    return (await this.canonicalEntries()).find(
+      (binding) => binding.childSessionKey === sessionKey,
+    );
+  }
+
+  async byRun(runId: string): Promise<RunBinding | undefined> {
+    return (await this.canonicalEntries()).find((binding) => binding.runId === runId);
+  }
+
+  async save(binding: RunBinding): Promise<void> {
+    await this.store.register(
+      this.executionKey(binding.executionId, binding.attemptId),
+      binding,
+      isTerminalBinding(binding.status) ? { ttlMs: terminalBindingTtlMs } : undefined,
+    );
+  }
+
+  async claimSpawn(params: {
+    executionId: string;
+    attemptId: string;
+    targetAgentId: string;
+    childSessionKey: string;
+    runId: string;
+    now: number;
+  }): Promise<{ binding: RunBinding; claimed: boolean }> {
+    if (!this.store.update) {
+      throw new Error("FlowOS Execution binding store does not support atomic updates");
+    }
+    let result: RunBinding | undefined;
+    let claimed = false;
+    await this.store.update(this.executionKey(params.executionId, params.attemptId), (current) => {
+      if (!current) {
+        throw new Error("FlowOS Execution binding not found");
+      }
+      if (current.targetAgentId || current.status !== "CREATED") {
+        result = current;
+        return current;
+      }
+      claimed = true;
+      result = {
+        ...current,
+        targetAgentId: params.targetAgentId,
+        childSessionKey: params.childSessionKey,
+        runId: params.runId,
+        status: "STARTING",
+        updatedAt: params.now,
+      };
+      return result;
+    });
+    if (!result) {
+      throw new Error("FlowOS Execution binding claim failed");
+    }
+    return { binding: result, claimed };
+  }
+
+  async canonicalEntries(): Promise<RunBinding[]> {
+    const entries = await this.store.entries();
+    return entries
+      .filter((entry) => entry.key.startsWith("execution:"))
+      .map((entry) => entry.value);
+  }
+
+  private executionKey(executionId: string, attemptId: string): string {
+    return `execution:${executionId}:${attemptId}`;
+  }
+}
+
+export function childSessionKey(agentId: string, executionId: string, attemptId: string): string {
+  const safeAgent = agentId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64) || "agent";
+  const suffix = `${executionId}-${attemptId}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120);
+  return `agent:${safeAgent}:subagent:flowos-${suffix}`;
+}
