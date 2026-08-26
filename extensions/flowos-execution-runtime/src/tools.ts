@@ -290,7 +290,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             `[FlowOS Execution]\nexecutionId=${params.executionId}\nattemptId=${params.attemptId}\nexpectedVersion=${detail.version}\n` +
             "Only report structured progress with flowos_execution_stage. Do not complete or fail the Execution.\n\n" +
             params.task,
-          deliver: true,
+          deliver: false,
           lightContext: true,
           lane: `flowos-execution:${params.executionId}`,
           idempotencyKey:

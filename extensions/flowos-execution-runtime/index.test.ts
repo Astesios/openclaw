@@ -278,7 +278,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(running).toMatchObject({ runId: "run-1", status: "RUNNING" });
     expect(subagent.run).toHaveBeenCalledWith(
       expect.objectContaining({
-        deliver: true,
+        deliver: false,
         message: expect.stringContaining("expectedVersion=1"),
       }),
     );
