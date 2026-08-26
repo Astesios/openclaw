@@ -1,10 +1,11 @@
+import { createHash, generateKeyPairSync } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { verifyDeviceToken } from "../../src/infra/device-pairing.js";
+import { getPairedDevice, verifyDeviceToken } from "../../src/infra/device-pairing.js";
 import plugin from "./index.js";
 
 const originalStateDir = process.env.OPENCLAW_STATE_DIR;
@@ -42,12 +43,15 @@ describe("FlowOS device onboarding provisioning", () => {
       ([name]) => name === "flowos.deviceOnboardingProvision",
     ) as [string, Parameters<OpenClawPluginApi["registerGatewayMethod"]>[1], { scope: string }];
     expect(registration[2]).toEqual({ scope: "operator.admin" });
-    const respond = vi.fn();
-    await registration[1]({
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyBytes = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+    const publicKeyText = publicKeyBytes.toString("base64url");
+    const deviceId = createHash("sha256").update(publicKeyBytes).digest("hex");
+    const request = {
       req: {} as never,
       params: {
-        deviceId: "flowgo-integration-1",
-        devicePublicKey: "ed25519-integration-public-key-material",
+        deviceId,
+        devicePublicKey: publicKeyText,
       },
       client: {
         isDeviceTokenAuth: true,
@@ -59,12 +63,22 @@ describe("FlowOS device onboarding provisioning", () => {
       } as never,
       isWebchatConnect: () => false,
       context: {} as GatewayRequestHandlerOptions["context"],
-      respond,
-    });
+    };
+    const respond = vi.fn();
+    await registration[1]({ ...request, respond });
 
     expect(respond.mock.calls[0][0]).toBe(true);
     const result = respond.mock.calls[0][1] as { deviceId: string; deviceToken: string };
-    expect(result.deviceId).toBe("flowgo-integration-1");
+    expect(result.deviceId).toBe(deviceId);
+    await expect(getPairedDevice(deviceId)).resolves.toMatchObject({
+      publicKey: publicKeyText,
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      clientId: "gateway-client",
+      clientMode: "ui",
+      role: "operator",
+      scopes: ["operator.read", "operator.write"],
+    });
     await expect(
       verifyDeviceToken({
         deviceId: result.deviceId,
@@ -73,5 +87,13 @@ describe("FlowOS device onboarding provisioning", () => {
         scopes: ["operator.read", "operator.write"],
       }),
     ).resolves.toEqual({ ok: true });
+
+    const retried = vi.fn();
+    await registration[1]({ ...request, respond: retried });
+    expect(retried.mock.calls[0][0]).toBe(true);
+    expect(retried.mock.calls[0][1]).toMatchObject({
+      deviceId,
+      deviceToken: result.deviceToken,
+    });
   });
 });

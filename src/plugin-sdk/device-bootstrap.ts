@@ -3,6 +3,7 @@
 export {
   approveDevicePairing,
   ensureDeviceToken,
+  getPairedDevice,
   listDevicePairing,
   requestDevicePairing,
 } from "../infra/device-pairing.js";

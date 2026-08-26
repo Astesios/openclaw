@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -11,12 +12,14 @@ const pairingMocks = vi.hoisted(() => ({
   request: vi.fn(),
   approve: vi.fn(),
   ensure: vi.fn(),
+  get: vi.fn(),
 }));
 
 vi.mock("openclaw/plugin-sdk/device-bootstrap", () => ({
   requestDevicePairing: pairingMocks.request,
   approveDevicePairing: pairingMocks.approve,
   ensureDeviceToken: pairingMocks.ensure,
+  getPairedDevice: pairingMocks.get,
 }));
 import plugin, {
   createProactiveConcernTool,
@@ -321,6 +324,10 @@ describe("flowos task-center auth", () => {
   });
 
   it("provisions the scanned FlowGo identity with a bounded operator token", async () => {
+    const publicKeyBytes = Buffer.alloc(32, 7);
+    const publicKey = publicKeyBytes.toString("base64url");
+    const deviceId = createHash("sha256").update(publicKeyBytes).digest("hex");
+    pairingMocks.get.mockResolvedValue(null);
     pairingMocks.request.mockResolvedValue({
       status: "pending",
       created: true,
@@ -336,21 +343,55 @@ describe("flowos task-center auth", () => {
     expect(options).toEqual({ scope: "operator.admin" });
     const respond = vi.fn();
     await invoke(handler, {
-      params: { deviceId: "flowgo-1", devicePublicKey: "ed25519-public-key-material" },
+      params: { deviceId, devicePublicKey: publicKey },
       client: pairedOperator(),
       respond,
     });
     expect(respond).toHaveBeenCalledWith(true, {
-      deviceId: "flowgo-1",
+      deviceId,
+      devicePublicKey: publicKey,
       deviceToken: "flowgo-device-token",
     });
     expect(pairingMocks.request).toHaveBeenCalledWith(
       expect.objectContaining({
-        deviceId: "flowgo-1",
+        deviceId,
+        publicKey,
+        platform: "linux",
+        deviceFamily: "RaspberryPi",
+        clientId: "gateway-client",
+        clientMode: "ui",
         role: "operator",
         scopes: ["operator.read", "operator.write"],
       }),
     );
+  });
+
+  it("retries the same provisioned identity without rotating its device token", async () => {
+    const publicKeyBytes = Buffer.alloc(32, 8);
+    const publicKey = publicKeyBytes.toString("base64url");
+    const deviceId = createHash("sha256").update(publicKeyBytes).digest("hex");
+    pairingMocks.get.mockResolvedValue({
+      deviceId,
+      publicKey,
+      clientId: "gateway-client",
+      clientMode: "ui",
+      deviceFamily: "RaspberryPi",
+    });
+    pairingMocks.ensure.mockResolvedValue({ token: "stable-device-token" });
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.deviceOnboardingProvision");
+    const respond = vi.fn();
+    await invoke(handler, {
+      params: { deviceId, devicePublicKey: publicKey },
+      client: pairedOperator(),
+      respond,
+    });
+    expect(respond.mock.calls[0][1]).toMatchObject({
+      deviceId,
+      deviceToken: "stable-device-token",
+    });
+    expect(pairingMocks.request).not.toHaveBeenCalled();
+    expect(pairingMocks.approve).not.toHaveBeenCalled();
   });
 
   it("issues proactive-service tokens on their own audience", async () => {

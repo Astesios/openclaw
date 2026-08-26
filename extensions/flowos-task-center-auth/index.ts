@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import {
   approveDevicePairing,
   ensureDeviceToken,
+  getPairedDevice,
   requestDevicePairing,
 } from "openclaw/plugin-sdk/device-bootstrap";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
@@ -456,6 +458,12 @@ function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
       const input = params ?? {};
       const deviceId = normalizedString(input.deviceId);
       const publicKey = normalizedString(input.devicePublicKey);
+      let publicKeyBytes: Buffer;
+      try {
+        publicKeyBytes = Buffer.from(publicKey, "base64url");
+      } catch {
+        publicKeyBytes = Buffer.alloc(0);
+      }
       if (
         !client?.isDeviceTokenAuth ||
         client.connect.role !== "operator" ||
@@ -467,20 +475,44 @@ function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
       if (
         !hasExactKeys(input, ["deviceId", "devicePublicKey"]) ||
         !validIdentifier(deviceId) ||
-        publicKey.length < 16 ||
-        publicKey.length > 4096
+        publicKeyBytes.length !== 32 ||
+        publicKeyBytes.toString("base64url") !== publicKey ||
+        createHash("sha256").update(publicKeyBytes).digest("hex") !== deviceId
       ) {
         reject(respond, "valid device identity is required");
         return;
       }
       try {
+        const existing = await getPairedDevice(deviceId);
+        if (existing) {
+          if (
+            existing.publicKey !== publicKey ||
+            existing.clientId !== "gateway-client" ||
+            existing.clientMode !== "ui" ||
+            existing.deviceFamily !== "RaspberryPi"
+          ) {
+            reject(respond, "existing device identity does not match onboarding request");
+            return;
+          }
+          const token = await ensureDeviceToken({
+            deviceId,
+            role: "operator",
+            scopes: ["operator.read", "operator.write"],
+          });
+          if (!token) {
+            reject(respond, "device token is unavailable");
+            return;
+          }
+          respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
+          return;
+        }
         const requested = await requestDevicePairing({
           deviceId,
           publicKey,
           displayName: "FlowGo",
           platform: "linux",
-          deviceFamily: "flowgo",
-          clientId: "flowgo-pet",
+          deviceFamily: "RaspberryPi",
+          clientId: "gateway-client",
           clientMode: "ui",
           role: "operator",
           scopes: ["operator.read", "operator.write"],
@@ -502,7 +534,7 @@ function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
           reject(respond, "device token is unavailable");
           return;
         }
-        respond(true, { deviceId, deviceToken: token.token });
+        respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
       } catch {
         respond(false, undefined, { code: "UNAVAILABLE", message: "device provisioning failed" });
       }
