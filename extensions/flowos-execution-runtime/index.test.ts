@@ -2,13 +2,18 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import plugin, { normalizeOwnerAgentId } from "./index.js";
+import plugin, {
+  clearRuntimeSecretForTest,
+  consumeRuntimeToken,
+  normalizeOwnerAgentId,
+} from "./index.js";
 import { RunBindingStore, type RunBinding } from "./src/bindings.js";
 import {
   FlowosExecutionClient,
   resolveTrustedAssistEndpoint,
   type AssistRequest,
 } from "./src/client.js";
+import { ExecutionLocks } from "./src/locks.js";
 import { FlowosExecutionRuntime } from "./src/runtime.js";
 import { createFlowosExecutionTools } from "./src/tools.js";
 
@@ -16,6 +21,7 @@ const originalEnv = { ...process.env };
 
 afterEach(() => {
   process.env = { ...originalEnv };
+  clearRuntimeSecretForTest();
 });
 
 function memoryStore<T>(): PluginStateKeyedStore<T> {
@@ -60,7 +66,13 @@ function memoryStore<T>(): PluginStateKeyedStore<T> {
   };
 }
 
-function fakeClient() {
+function fakeClient(options?: {
+  beforeRequest?: (
+    method: "GET" | "POST",
+    path: string,
+    payload?: Record<string, unknown>,
+  ) => Promise<void> | void;
+}) {
   const calls: Array<{ method: string; path: string; payload?: Record<string, unknown> }> = [];
   let item = {
     executionId: "execution-1",
@@ -71,6 +83,7 @@ function fakeClient() {
     stageKey: "planning",
   };
   const request: AssistRequest = vi.fn(async (method, path, payload) => {
+    await options?.beforeRequest?.(method, path, payload);
     calls.push({ method, path, payload });
     if (method === "GET") {
       return item;
@@ -94,7 +107,9 @@ function fakeClient() {
 
 function fakeSubagent() {
   return {
-    run: vi.fn<PluginRuntime["subagent"]["run"]>(async () => ({ runId: "run-1" })),
+    run: vi.fn<PluginRuntime["subagent"]["run"]>(async (params) => ({
+      runId: params.idempotencyKey ?? "run-1",
+    })),
     waitForRun: vi.fn<PluginRuntime["subagent"]["waitForRun"]>(async () => ({
       status: "timeout",
     })),
@@ -111,21 +126,37 @@ function tools(params?: {
   client?: FlowosExecutionClient;
   bindings?: RunBindingStore;
   subagent?: ReturnType<typeof fakeSubagent>;
+  locks?: ExecutionLocks;
+  runtime?: FlowosExecutionRuntime;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
   const subagent = params?.subagent ?? fakeSubagent();
+  const locks = params?.locks ?? new ExecutionLocks();
+  const runtime =
+    params?.runtime ??
+    new FlowosExecutionRuntime(
+      assist.client,
+      bindings,
+      subagent as never,
+      { warn: vi.fn(), info: vi.fn() },
+      locks,
+    );
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
     context: params?.context ?? { agentId: "main", sessionKey: "agent:main:main" },
     client: assist.client,
     bindings,
+    locks,
+    runtime,
     ownerAgentId: "agent:main",
   });
   return {
     byName: new Map(created.map((tool) => [tool.name, tool])),
     bindings,
     subagent,
+    locks,
+    runtime,
   };
 }
 
@@ -160,8 +191,26 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(normalizeOwnerAgentId("agent:../main")).toBeNull();
   });
 
+  it("consumes a mode-600 one-shot token file and rejects process-env secrets", () => {
+    const directory = mkdtempSync(join(tmpdir(), "flowos-execution-secret-"));
+    const tokenFile = join(directory, "writer.token");
+    try {
+      writeFileSync(tokenFile, "t".repeat(64), { mode: 0o600 });
+      chmodSync(tokenFile, 0o600);
+      expect(consumeRuntimeToken({ LONG_TASK_EXECUTION_TOKEN_FILE: tokenFile })).toBe(
+        "t".repeat(64),
+      );
+      expect(existsSync(tokenFile)).toBe(false);
+      clearRuntimeSecretForTest();
+      expect(consumeRuntimeToken({ LONG_TASK_EXECUTION_TOKEN: "x".repeat(64) })).toBeNull();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("registers no tools when private runtime config is missing", () => {
     delete process.env.LONG_TASK_EXECUTION_TOKEN;
+    delete process.env.LONG_TASK_EXECUTION_TOKEN_FILE;
     delete process.env.LONG_TASK_EXECUTION_AGENT_ID;
     const registerTool = vi.fn();
     plugin.register({
@@ -209,6 +258,49 @@ describe("FlowOS Execution plugin boundaries", () => {
       context: { agentId: "main", sessionKey: "agent:main:other" },
     });
     await expect(startExecution(other.byName)).rejects.toThrow("another owner session");
+  });
+
+  it("scopes Assist idempotency to the trusted requester session when local state is empty", async () => {
+    const assist = fakeClient();
+    const first = tools({
+      client: assist.client,
+      context: { agentId: "main", sessionKey: "agent:main:first" },
+    });
+    const second = tools({
+      client: assist.client,
+      context: { agentId: "main", sessionKey: "agent:main:second" },
+    });
+    await startExecution(first.byName);
+    await startExecution(second.byName);
+    const keys = assist.calls
+      .filter((call) => call.path === "/api/executions")
+      .map((call) => call.payload?.idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("persists one canonical active binding without expiring aliases", async () => {
+    const state = memoryStore<RunBinding>();
+    const bindings = new RunBindingStore(state);
+    await bindings.save({
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      requesterSessionKey: "agent:main:main",
+      ownerAgentId: "agent:main",
+      targetAgentId: "worker",
+      childSessionKey: "agent:worker:subagent:flowos-1",
+      runId: "run-1",
+      status: "RUNNING",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const entries = await state.entries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.key).toBe("execution:execution-1:attempt-1");
+    expect(entries[0]?.expiresAt).toBeUndefined();
+    expect(await bindings.byChild("agent:worker:subagent:flowos-1")).toMatchObject({
+      runId: "run-1",
+    });
   });
 
   it("child can only stage its own running Execution Attempt", async () => {
@@ -289,9 +381,69 @@ describe("FlowOS Execution plugin boundaries", () => {
       task: "generate result",
     });
     expect(subagent.run).toHaveBeenCalledOnce();
+    const schema = JSON.stringify(owner.byName.get("flowos_execution_spawn")?.parameters);
+    expect(schema).not.toContain("idempotencyKey");
   });
 
-  it("re-resolves the writer version before mutation and rejects future versions", async () => {
+  it("serializes concurrent spawn calls into one atomic run claim", async () => {
+    const store = new RunBindingStore(memoryStore());
+    const subagent = fakeSubagent();
+    let releaseRun = () => {};
+    let markEntered = () => {};
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseRun = resolve;
+    });
+    subagent.run.mockImplementation(async (params) => {
+      markEntered();
+      await gate;
+      return { runId: params.idempotencyKey! };
+    });
+    const owner = tools({ bindings: store, subagent });
+    await startExecution(owner.byName);
+    const input = {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      agentId: "worker",
+      task: "generate result",
+    };
+    const first = owner.byName.get("flowos_execution_spawn")!.execute("spawn-1", input);
+    await entered;
+    const second = owner.byName
+      .get("flowos_execution_spawn")!
+      .execute("spawn-2", { ...input, task: "different model text" });
+    releaseRun();
+    await Promise.all([first, second]);
+    expect(subagent.run).toHaveBeenCalledOnce();
+    expect(await store.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "RUNNING",
+      targetAgentId: "worker",
+    });
+  });
+
+  it("rejects completion while a bound child is still active", async () => {
+    const owner = tools();
+    await startExecution(owner.byName);
+    await owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      agentId: "worker",
+      task: "generate result",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 1,
+        resultType: "RESOURCE",
+        resultId: "resource-1",
+      }),
+    ).rejects.toThrow("has not ended successfully");
+  });
+
+  it("rejects stale and future writer versions without changing state", async () => {
     const assist = fakeClient();
     const owner = tools({ client: assist.client });
     await startExecution(owner.byName);
@@ -300,16 +452,16 @@ describe("FlowOS Execution plugin boundaries", () => {
       stageKey: "runtime-stage",
       stageLabel: "运行时已推进",
     });
-    await owner.byName.get("flowos_execution_stage")?.execute("stage", {
-      executionId: "execution-1",
-      attemptId: "attempt-1",
-      expectedVersion: 1,
-      stageKey: "validated",
-      stageLabel: "已按最新版本推进",
-    });
-    expect(assist.getItem()).toMatchObject({ version: 3, stageKey: "validated" });
-    const lastStage = assist.calls.findLast((call) => call.path.endsWith("/stage"));
-    expect(lastStage?.payload?.expectedVersion).toBe(2);
+    await expect(
+      owner.byName.get("flowos_execution_stage")?.execute("stale", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 1,
+        stageKey: "stale",
+        stageLabel: "错误旧阶段",
+      }),
+    ).rejects.toThrow("does not match");
+    expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "runtime-stage" });
 
     await expect(
       owner.byName.get("flowos_execution_stage")?.execute("future", {
@@ -319,7 +471,8 @@ describe("FlowOS Execution plugin boundaries", () => {
         stageKey: "future",
         stageLabel: "错误未来版本",
       }),
-    ).rejects.toThrow("newer than the current");
+    ).rejects.toThrow("does not match");
+    expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "runtime-stage" });
   });
 
   it("complete registers RESOURCE before atomically completing the owner Execution", async () => {
@@ -350,7 +503,13 @@ describe("FlowOS Execution typed hooks", () => {
       assist,
       bindings,
       subagent,
-      instance: new FlowosExecutionRuntime(assist.client, bindings, subagent as never, logger),
+      instance: new FlowosExecutionRuntime(
+        assist.client,
+        bindings,
+        subagent as never,
+        logger,
+        new ExecutionLocks(),
+      ),
     };
   }
 
@@ -369,21 +528,6 @@ describe("FlowOS Execution typed hooks", () => {
     await bindings.save(value);
     return value;
   }
-
-  it("subagent_spawned binds only exact child requester agent and run", async () => {
-    const ctx = runtime();
-    const value = await pending(ctx.bindings);
-    await ctx.instance.subagentSpawned(
-      { runId: "run-1", childSessionKey: value.childSessionKey!, agentId: "worker" },
-      { childSessionKey: value.childSessionKey, requesterSessionKey: value.requesterSessionKey },
-    );
-    expect(await ctx.bindings.byRun("run-1")).toMatchObject({ status: "RUNNING" });
-    await ctx.instance.subagentSpawned(
-      { runId: "run-evil", childSessionKey: value.childSessionKey!, agentId: "worker" },
-      { childSessionKey: value.childSessionKey, requesterSessionKey: "agent:other:main" },
-    );
-    expect(await ctx.bindings.byRun("run-evil")).toBeUndefined();
-  });
 
   it("ok end moves to validating but never completes and replay is harmless", async () => {
     const ctx = runtime();
@@ -404,6 +548,143 @@ describe("FlowOS Execution typed hooks", () => {
     expect(ctx.assist.getItem()).toMatchObject({ status: "RUNNING", stageKey: "validating" });
     expect(ctx.assist.calls.filter((call) => call.path.endsWith("/stage"))).toHaveLength(1);
     expect(ctx.assist.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);
+  });
+
+  it("serializes an ended hook ahead of a late child stage", async () => {
+    let releaseValidation = () => {};
+    let markValidationEntered = () => {};
+    const validationEntered = new Promise<void>((resolve) => {
+      markValidationEntered = resolve;
+    });
+    const validationGate = new Promise<void>((resolve) => {
+      releaseValidation = resolve;
+    });
+    const assist = fakeClient({
+      async beforeRequest(_method, path, payload) {
+        if (path.endsWith("/stage") && payload?.stageKey === "validating") {
+          markValidationEntered();
+          await validationGate;
+        }
+      },
+    });
+    const owner = tools({ client: assist.client });
+    const binding: RunBinding = {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      requesterSessionKey: "agent:main:owner",
+      ownerAgentId: "agent:main",
+      targetAgentId: "main",
+      childSessionKey: "agent:main:subagent:flowos-1",
+      runId: "run-1",
+      status: "RUNNING",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    await owner.bindings.save(binding);
+    const child = tools({
+      client: assist.client,
+      bindings: owner.bindings,
+      subagent: owner.subagent,
+      locks: owner.locks,
+      runtime: owner.runtime,
+      context: { agentId: "main", sessionKey: binding.childSessionKey },
+    });
+    const ended = owner.runtime.subagentEnded(
+      {
+        targetSessionKey: binding.childSessionKey!,
+        targetKind: "subagent",
+        runId: "run-1",
+        outcome: "ok",
+      },
+      { childSessionKey: binding.childSessionKey, requesterSessionKey: "agent:main:main" },
+    );
+    await validationEntered;
+    const lateStage = child.byName.get("flowos_execution_stage")!.execute("late-stage", {
+      executionId: "execution-1",
+      expectedVersion: 1,
+      stageKey: "late",
+      stageLabel: "迟到阶段",
+    });
+    releaseValidation();
+    await ended;
+    await expect(lateStage).rejects.toThrow("capability is unavailable");
+    expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "validating" });
+  });
+
+  it("replays terminal sync without incrementing version after a local checkpoint failure", async () => {
+    const base = memoryStore<RunBinding>();
+    let registerCount = 0;
+    const flakyStore: PluginStateKeyedStore<RunBinding> = {
+      ...base,
+      async register(key, value, opts) {
+        registerCount += 1;
+        if (registerCount === 4) {
+          throw new Error("checkpoint unavailable");
+        }
+        await base.register(key, value, opts);
+      },
+    };
+    const assist = fakeClient();
+    const bindings = new RunBindingStore(flakyStore);
+    const subagent = fakeSubagent();
+    const executionRuntime = new FlowosExecutionRuntime(
+      assist.client,
+      bindings,
+      subagent as never,
+      { warn: vi.fn(), info: vi.fn() },
+      new ExecutionLocks(),
+    );
+    const value = await pending(bindings);
+    await bindings.save({ ...value, runId: "run-1", status: "RUNNING" });
+    const event = {
+      targetSessionKey: value.childSessionKey!,
+      targetKind: "subagent" as const,
+      runId: "run-1",
+      outcome: "ok" as const,
+    };
+    const hookContext = {
+      childSessionKey: value.childSessionKey,
+      requesterSessionKey: value.requesterSessionKey,
+    };
+    await executionRuntime.subagentEnded(event, hookContext);
+    expect(await bindings.byRun("run-1")).toMatchObject({ status: "ENDED_OK_PENDING_SYNC" });
+    expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "validating" });
+    await executionRuntime.reconcile();
+    expect(await bindings.byRun("run-1")).toMatchObject({ status: "ENDED_OK" });
+    expect(assist.getItem()).toMatchObject({ version: 2, stageKey: "validating" });
+    expect(assist.calls.filter((call) => call.path.endsWith("/stage"))).toHaveLength(1);
+  });
+
+  it("reconciles a deferred spawn failure to a terminal Execution", async () => {
+    let failUnavailable = true;
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (failUnavailable && path.endsWith("/fail")) {
+          throw new Error("Assist unavailable");
+        }
+      },
+    });
+    const subagent = fakeSubagent();
+    subagent.run.mockRejectedValue(new Error("spawn rejected"));
+    const owner = tools({ client: assist.client, subagent });
+    await startExecution(owner.byName);
+    await expect(
+      owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        agentId: "worker",
+        task: "generate result",
+      }),
+    ).rejects.toThrow("spawn rejected");
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "SPAWN_FAILED_PENDING_SYNC",
+    });
+    failUnavailable = false;
+    await owner.runtime.reconcile();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "SPAWN_FAILED",
+    });
+    expect(assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
   });
 
   it("timeout end maps to a retryable provider timeout failure", async () => {
@@ -434,3 +715,6 @@ describe("FlowOS Execution typed hooks", () => {
     expect(await ctx.bindings.byRun("run-1")).toMatchObject({ status: "ENDED_OK" });
   });
 });
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";

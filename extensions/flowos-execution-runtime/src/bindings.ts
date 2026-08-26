@@ -8,6 +8,7 @@ export type RunBindingStatus =
   | "ENDED_ERROR_PENDING_SYNC"
   | "ENDED_OK"
   | "ENDED_ERROR"
+  | "SPAWN_FAILED_PENDING_SYNC"
   | "SPAWN_FAILED";
 
 export type RunBinding = {
@@ -24,7 +25,11 @@ export type RunBinding = {
   updatedAt: number;
 };
 
-const bindingTtlMs = 6 * 60 * 60 * 1_000;
+const terminalBindingTtlMs = 6 * 60 * 60 * 1_000;
+
+function isTerminalBinding(status: RunBindingStatus): boolean {
+  return status === "ENDED_OK" || status === "ENDED_ERROR" || status === "SPAWN_FAILED";
+}
 
 export class RunBindingStore {
   constructor(private readonly store: PluginStateKeyedStore<RunBinding>) {}
@@ -34,26 +39,59 @@ export class RunBindingStore {
   }
 
   async byChild(sessionKey: string): Promise<RunBinding | undefined> {
-    return await this.store.lookup(`child:${sessionKey}`);
+    return (await this.canonicalEntries()).find(
+      (binding) => binding.childSessionKey === sessionKey,
+    );
   }
 
   async byRun(runId: string): Promise<RunBinding | undefined> {
-    return await this.store.lookup(`run:${runId}`);
+    return (await this.canonicalEntries()).find((binding) => binding.runId === runId);
   }
 
   async save(binding: RunBinding): Promise<void> {
-    const opts = { ttlMs: bindingTtlMs };
     await this.store.register(
       this.executionKey(binding.executionId, binding.attemptId),
       binding,
-      opts,
+      isTerminalBinding(binding.status) ? { ttlMs: terminalBindingTtlMs } : undefined,
     );
-    if (binding.childSessionKey) {
-      await this.store.register(`child:${binding.childSessionKey}`, binding, opts);
+  }
+
+  async claimSpawn(params: {
+    executionId: string;
+    attemptId: string;
+    targetAgentId: string;
+    childSessionKey: string;
+    runId: string;
+    now: number;
+  }): Promise<{ binding: RunBinding; claimed: boolean }> {
+    if (!this.store.update) {
+      throw new Error("FlowOS Execution binding store does not support atomic updates");
     }
-    if (binding.runId) {
-      await this.store.register(`run:${binding.runId}`, binding, opts);
+    let result: RunBinding | undefined;
+    let claimed = false;
+    await this.store.update(this.executionKey(params.executionId, params.attemptId), (current) => {
+      if (!current) {
+        throw new Error("FlowOS Execution binding not found");
+      }
+      if (current.targetAgentId || current.status !== "CREATED") {
+        result = current;
+        return current;
+      }
+      claimed = true;
+      result = {
+        ...current,
+        targetAgentId: params.targetAgentId,
+        childSessionKey: params.childSessionKey,
+        runId: params.runId,
+        status: "STARTING",
+        updatedAt: params.now,
+      };
+      return result;
+    });
+    if (!result) {
+      throw new Error("FlowOS Execution binding claim failed");
     }
+    return { binding: result, claimed };
   }
 
   async canonicalEntries(): Promise<RunBinding[]> {

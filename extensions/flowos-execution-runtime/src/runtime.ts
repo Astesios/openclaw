@@ -1,18 +1,13 @@
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import { RunBindingStore, type RunBinding } from "./bindings.js";
 import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
+import { ExecutionLocks } from "./locks.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 
 type RuntimeLogger = {
   warn(message: string): void;
   info(message: string): void;
-};
-
-type SpawnedEvent = {
-  runId: string;
-  childSessionKey: string;
-  agentId: string;
 };
 
 type EndedEvent = {
@@ -28,7 +23,11 @@ type SubagentContext = {
 };
 
 function terminal(binding: RunBinding): boolean {
-  return binding.status === "ENDED_OK" || binding.status === "ENDED_ERROR";
+  return (
+    binding.status === "ENDED_OK" ||
+    binding.status === "ENDED_ERROR" ||
+    binding.status === "SPAWN_FAILED"
+  );
 }
 
 function errorForOutcome(outcome: string | undefined): { errorCode: string; retryable: boolean } {
@@ -61,62 +60,77 @@ export class FlowosExecutionRuntime {
     private readonly bindings: RunBindingStore,
     private readonly subagent: PluginRuntime["subagent"],
     private readonly logger: RuntimeLogger,
+    private readonly locks: ExecutionLocks,
   ) {}
-
-  async subagentSpawned(event: SpawnedEvent, ctx: SubagentContext): Promise<void> {
-    const pending = await this.bindings.byChild(event.childSessionKey);
-    if (
-      !pending ||
-      pending.requesterSessionKey !== ctx.requesterSessionKey ||
-      pending.childSessionKey !== ctx.childSessionKey ||
-      pending.targetAgentId !== event.agentId ||
-      (pending.runId && pending.runId !== event.runId)
-    ) {
-      return;
-    }
-    await this.bindings.save({
-      ...pending,
-      runId: event.runId,
-      status: "RUNNING",
-      updatedAt: Date.now(),
-    });
-  }
 
   async subagentEnded(event: EndedEvent, ctx: SubagentContext): Promise<void> {
     if (event.targetKind !== "subagent") {
       return;
     }
-    const binding = event.runId
+    const found = event.runId
       ? await this.bindings.byRun(event.runId)
       : await this.bindings.byChild(event.targetSessionKey);
-    if (
-      !binding ||
-      terminal(binding) ||
-      binding.childSessionKey !== event.targetSessionKey ||
-      binding.childSessionKey !== ctx.childSessionKey ||
-      (event.runId && binding.runId !== event.runId)
-    ) {
+    if (!found) {
       return;
     }
-    const outcome = event.outcome ?? "error";
-    const pending: RunBinding = {
-      ...binding,
-      outcome,
-      status: outcome === "ok" ? "ENDED_OK_PENDING_SYNC" : "ENDED_ERROR_PENDING_SYNC",
-      updatedAt: Date.now(),
-    };
-    await this.bindings.save(pending);
-    await this.syncTerminal(pending);
+    await this.locks.run(found.executionId, found.attemptId, async () => {
+      const binding = await this.bindings.byExecution(found.executionId, found.attemptId);
+      if (
+        !binding ||
+        terminal(binding) ||
+        binding.childSessionKey !== event.targetSessionKey ||
+        binding.childSessionKey !== ctx.childSessionKey ||
+        (event.runId && binding.runId !== event.runId)
+      ) {
+        return;
+      }
+      const outcome = event.outcome ?? "error";
+      const pending: RunBinding = {
+        ...binding,
+        outcome,
+        status: outcome === "ok" ? "ENDED_OK_PENDING_SYNC" : "ENDED_ERROR_PENDING_SYNC",
+        updatedAt: Date.now(),
+      };
+      await this.bindings.save(pending);
+      await this.syncTerminalLocked(pending);
+    });
   }
 
   async reconcile(): Promise<void> {
     for (const binding of await this.bindings.canonicalEntries()) {
-      if (binding.status.endsWith("_PENDING_SYNC")) {
-        await this.syncTerminal(binding);
+      if (binding.status === "SPAWN_FAILED_PENDING_SYNC") {
+        await this.locks.run(binding.executionId, binding.attemptId, async () => {
+          const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+          if (current?.status === "SPAWN_FAILED_PENDING_SYNC") {
+            await this.syncSpawnFailureLocked(current);
+          }
+        });
         continue;
       }
-      if (binding.status !== "RUNNING" || !binding.runId || !binding.childSessionKey) {
+      if (binding.status.endsWith("_PENDING_SYNC")) {
+        await this.locks.run(binding.executionId, binding.attemptId, async () => {
+          const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+          if (current?.status.endsWith("_PENDING_SYNC")) {
+            await this.syncTerminalLocked(current);
+          }
+        });
         continue;
+      }
+      if (
+        (binding.status !== "RUNNING" && binding.status !== "STARTING") ||
+        !binding.runId ||
+        !binding.childSessionKey
+      ) {
+        continue;
+      }
+      if (binding.status === "STARTING") {
+        const detail = await this.client.detail(binding.executionId).catch(() => undefined);
+        if (detail && !activeStatuses.has(detail.status)) {
+          await this.bindings
+            .save({ ...binding, status: "SPAWN_FAILED", updatedAt: Date.now() })
+            .catch(() => undefined);
+          continue;
+        }
       }
       const result = await this.subagent
         .waitForRun({ runId: binding.runId, timeoutMs: 1 })
@@ -139,16 +153,55 @@ export class FlowosExecutionRuntime {
     }
   }
 
-  private async syncTerminal(binding: RunBinding): Promise<void> {
+  async syncSpawnFailure(binding: RunBinding): Promise<void> {
+    await this.locks.run(binding.executionId, binding.attemptId, async () => {
+      const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+      const candidate =
+        current?.status === "SPAWN_FAILED_PENDING_SYNC"
+          ? current
+          : current?.status === "STARTING" && current.runId === binding.runId
+            ? binding
+            : undefined;
+      if (candidate) {
+        await this.syncSpawnFailureLocked(candidate);
+      }
+    });
+  }
+
+  private async syncSpawnFailureLocked(binding: RunBinding): Promise<void> {
+    try {
+      const detail = await latestStillNeedsSync(this.client, binding);
+      if (detail) {
+        await this.client.fail(binding.executionId, {
+          expectedVersion: detail.version,
+          errorCode: "INTERNAL",
+          retryable: true,
+        });
+      }
+      await this.bindings.save({
+        ...binding,
+        status: "SPAWN_FAILED",
+        updatedAt: Date.now(),
+      });
+    } catch (error) {
+      this.logger.warn(
+        `FlowOS Execution spawn failure sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+      );
+    }
+  }
+
+  private async syncTerminalLocked(binding: RunBinding): Promise<void> {
     try {
       const detail = await latestStillNeedsSync(this.client, binding);
       if (detail) {
         if (binding.outcome === "ok") {
-          await this.client.stage(binding.executionId, {
-            expectedVersion: detail.version,
-            stageKey: "validating",
-            stageLabel: "正在验证结果",
-          });
+          if (detail.stageKey !== "validating") {
+            await this.client.stage(binding.executionId, {
+              expectedVersion: detail.version,
+              stageKey: "validating",
+              stageLabel: "正在验证结果",
+            });
+          }
         } else {
           const failure = errorForOutcome(binding.outcome);
           await this.client.fail(binding.executionId, {
