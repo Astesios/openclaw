@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
@@ -35,6 +36,10 @@ function trustedOperator(client: GatewayRequestHandlerOptions["client"]): boolea
   );
 }
 
+function sessionAuditHash(sessionKey: string): string {
+  return createHash("sha256").update(sessionKey).digest("hex").slice(0, 12);
+}
+
 export default definePluginEntry({
   id: "flowos-surface-context",
   name: "FlowOS Surface Context",
@@ -51,6 +56,7 @@ export default definePluginEntry({
       "flowos.surfaceContext.bind",
       async ({ params, client, respond }) => {
         if (!trustedOperator(client)) {
+          api.logger.warn("FlowOS Surface Context bind rejected: untrusted operator client");
           reject(respond, "INVALID_REQUEST", "paired operator device authentication required");
           return;
         }
@@ -61,15 +67,20 @@ export default definePluginEntry({
           !normalizedString(input.sessionKey, 512) ||
           !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(String(input.sessionKey))
         ) {
+          api.logger.warn("FlowOS Surface Context bind rejected: invalid pointer-only request");
           reject(respond, "INVALID_REQUEST", "valid ContextRef and sessionKey are required");
           return;
         }
         if (!runtime) {
+          api.logger.warn("FlowOS Surface Context bind rejected: runtime unavailable");
           reject(respond, "UNAVAILABLE", "Surface Context runtime is not configured");
           return;
         }
         try {
           const binding = await runtime.bind(String(input.sessionKey), String(input.contextRef));
+          api.logger.info(
+            `FlowOS Surface Context bound session=${sessionAuditHash(String(input.sessionKey))} objectType=${binding.context.objectType}`,
+          );
           respond(true, {
             bound: true,
             objectType: binding.context.objectType,
@@ -82,7 +93,10 @@ export default definePluginEntry({
               : error instanceof Error && /^[A-Z0-9_]{1,80}$/.test(error.message)
                 ? error.message
                 : "CONTEXT_BIND_FAILED";
-          reject(respond, code, "Surface Context binding was rejected");
+          api.logger.warn(
+            `FlowOS Surface Context bind rejected session=${sessionAuditHash(String(input.sessionKey))} code=${code}`,
+          );
+          reject(respond, code, code);
         }
       },
       { scope: "operator.write" },
