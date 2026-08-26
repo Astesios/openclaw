@@ -2388,6 +2388,56 @@ describe("resolvePluginTools optional tools", () => {
     expect(loadOpenClawPluginsMock).not.toHaveBeenCalled();
   });
 
+  it("prefers the compatible active registry over a stale pinned channel tool runtime", async () => {
+    installToolManifestSnapshot({
+      config: createContext().config,
+      plugin: {
+        id: "optional-demo",
+        origin: "bundled",
+        enabledByDefault: true,
+        channels: [],
+        providers: [],
+        contracts: { tools: ["optional_tool"] },
+      },
+    });
+    const activeRegistry = createToolRegistry([
+      {
+        ...createOptionalDemoEntry(),
+        factory: () => ({
+          ...makeTool("optional_tool"),
+          async execute() {
+            return { content: [{ type: "text", text: "active" }] };
+          },
+        }),
+      },
+    ]);
+    const staleChannelRegistry = createToolRegistry([
+      {
+        ...createOptionalDemoEntry(),
+        factory: () => ({
+          ...makeTool("optional_tool"),
+          async execute() {
+            return { content: [{ type: "text", text: "channel" }] };
+          },
+        }),
+      },
+    ]);
+    setActivePluginRegistry(activeRegistry as never, "gateway-startup", "gateway-bindable", "/tmp");
+    pinActivePluginChannelRegistry(staleChannelRegistry as never);
+    resolveRuntimePluginRegistryMock.mockReturnValue(activeRegistry);
+
+    const [tool] = resolvePluginTools(
+      createResolveToolsParams({
+        toolAllowlist: ["optional_tool"],
+        allowGatewaySubagentBinding: true,
+      }),
+    );
+
+    await expect(tool?.execute("call-1", {})).resolves.toEqual({
+      content: [{ type: "text", text: "active" }],
+    });
+  });
+
   it("does not widen active registry reuse to non-matching plugin tool owners", () => {
     installToolManifestSnapshot({
       config: createContext().config,
