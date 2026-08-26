@@ -17,6 +17,7 @@ import {
 import { ExecutionLocks } from "./src/locks.js";
 import { FlowosExecutionRuntime } from "./src/runtime.js";
 import { createFlowosExecutionTools } from "./src/tools.js";
+import type { SpaceArtifactValidation } from "./src/validation.js";
 
 const originalEnv = { ...process.env };
 
@@ -144,6 +145,12 @@ function fakeSystem() {
   };
 }
 
+type ArtifactValidator = (params: {
+  spaceId: string;
+  filePath: string;
+  artifactType: "html" | "markdown";
+}) => Promise<SpaceArtifactValidation>;
+
 function tools(params?: {
   context?: { agentId?: string; sessionKey?: string };
   client?: FlowosExecutionClient;
@@ -152,6 +159,7 @@ function tools(params?: {
   system?: ReturnType<typeof fakeSystem>;
   locks?: ExecutionLocks;
   runtime?: FlowosExecutionRuntime;
+  validateArtifact?: ArtifactValidator;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
@@ -168,6 +176,12 @@ function tools(params?: {
       { warn: vi.fn(), info: vi.fn() },
       locks,
     );
+  const validateArtifact =
+    params?.validateArtifact ??
+    vi.fn<ArtifactValidator>(async () => ({
+      validatorId: "lushu-html-v1" as const,
+      contentSha256: "a".repeat(64),
+    }));
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
     context: params?.context ?? { agentId: "main", sessionKey: "agent:main:main" },
@@ -176,6 +190,7 @@ function tools(params?: {
     locks,
     runtime,
     ownerAgentId: "agent:main",
+    validateArtifact,
   });
   return {
     byName: new Map(created.map((tool) => [tool.name, tool])),
@@ -184,7 +199,23 @@ function tools(params?: {
     system,
     locks,
     runtime,
+    validateArtifact,
   };
+}
+
+async function markChildEndedOk(owner: ReturnType<typeof tools>) {
+  await owner.bindings.save({
+    executionId: "execution-1",
+    attemptId: "attempt-1",
+    requesterSessionKey: "agent:main:main",
+    ownerAgentId: "agent:main",
+    targetAgentId: "worker",
+    childSessionKey: "agent:worker:subagent:flowos-1",
+    runId: "run-1",
+    status: "ENDED_OK",
+    createdAt: 1,
+    updatedAt: 1,
+  });
 }
 
 async function startExecution(byName: Map<string, AnyAgentTool>) {
@@ -504,6 +535,23 @@ describe("FlowOS Execution plugin boundaries", () => {
     ).rejects.toThrow("has not ended successfully");
   });
 
+  it("rejects completion without an accepted child even when a file is claimed", async () => {
+    const owner = tools();
+    await startSpaceExecution(owner.byName);
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 1,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+      }),
+    ).rejects.toThrow("has not ended successfully");
+    expect(owner.validateArtifact).not.toHaveBeenCalled();
+  });
+
   it("rejects stale and future writer versions without changing state", async () => {
     const assist = fakeClient();
     const owner = tools({ client: assist.client });
@@ -540,10 +588,16 @@ describe("FlowOS Execution plugin boundaries", () => {
     const assist = fakeClient();
     const owner = tools({ client: assist.client });
     await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
     await owner.byName.get("flowos_execution_complete")?.execute("complete", {
       executionId: "execution-1",
       attemptId: "attempt-1",
-      expectedVersion: 1,
+      expectedVersion: 2,
       spaceId: "sp-trip",
       artifactTitle: "旅行路书",
       artifactFilePath: "generated/lushu.html",
@@ -553,6 +607,12 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(paths.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
       paths.indexOf("/api/executions/execution-1/complete"),
     );
+    expect(owner.validateArtifact).toHaveBeenCalledOnce();
+    const registration = assist.calls.find((call) => call.path.endsWith("/space-artifacts"));
+    expect(registration?.payload).toMatchObject({
+      validatorId: "lushu-html-v1",
+      contentSha256: "a".repeat(64),
+    });
     const schema = JSON.stringify(owner.byName.get("flowos_execution_complete")?.parameters);
     expect(schema).not.toContain("resultId");
     expect(schema).not.toContain("RESOURCE");

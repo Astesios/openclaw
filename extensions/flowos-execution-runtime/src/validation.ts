@@ -1,0 +1,88 @@
+import { createHash } from "node:crypto";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { resolve, sep } from "node:path";
+import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
+
+export type SpaceArtifactValidation = {
+  validatorId: "lushu-html-v1" | "space-markdown-v1";
+  contentSha256: string;
+};
+
+function contained(parent: string, child: string): boolean {
+  return child === parent || child.startsWith(`${parent}${sep}`);
+}
+
+function resolveArtifactPath(params: { workspaceDir: string; spaceId: string; filePath: string }): {
+  workspace: string;
+  target: string;
+} {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(params.spaceId)) {
+    throw new Error("Space Artifact has an invalid spaceId");
+  }
+  const parts = params.filePath.split("/");
+  if (
+    parts[0] !== "generated" ||
+    parts.length < 2 ||
+    parts.some((part) => !part || part === "." || part === "..")
+  ) {
+    throw new Error("Space Artifact filePath must be a generated relative path");
+  }
+  const workspace = realpathSync(params.workspaceDir);
+  const spaceRoot = resolve(workspace, "spaces", params.spaceId);
+  const target = resolve(spaceRoot, ...parts);
+  if (!contained(spaceRoot, target)) {
+    throw new Error("Space Artifact escaped its Space root");
+  }
+  let current = spaceRoot;
+  for (const part of parts) {
+    const stat = lstatSync(current);
+    if (stat.isSymbolicLink()) {
+      throw new Error("Space Artifact path cannot contain symbolic links");
+    }
+    current = resolve(current, part);
+  }
+  const targetStat = lstatSync(target);
+  if (targetStat.isSymbolicLink() || !targetStat.isFile() || targetStat.size < 1) {
+    throw new Error("Space Artifact must be a non-empty regular file");
+  }
+  if (targetStat.size > 4 * 1024 * 1024 || !contained(spaceRoot, realpathSync(target))) {
+    throw new Error("Space Artifact is too large or outside its Space root");
+  }
+  return { workspace, target };
+}
+
+export async function validateSpaceArtifact(params: {
+  runtime: Pick<PluginRuntime, "system">;
+  workspaceDir: string;
+  spaceId: string;
+  filePath: string;
+  artifactType: "html" | "markdown";
+}): Promise<SpaceArtifactValidation> {
+  const { workspace, target } = resolveArtifactPath(params);
+  const content = readFileSync(target);
+  const contentSha256 = createHash("sha256").update(content).digest("hex");
+  if (params.artifactType === "markdown") {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(content);
+    if (!text.trim()) {
+      throw new Error("Markdown Artifact validator rejected empty content");
+    }
+    return { validatorId: "space-markdown-v1", contentSha256 };
+  }
+  if (!target.toLowerCase().endsWith(".html")) {
+    throw new Error("Routebook validator only accepts HTML artifacts");
+  }
+  const validator = resolve(workspace, "skills", "lushu", "scripts", "validate-lushu.sh");
+  const validatorStat = lstatSync(validator);
+  if (validatorStat.isSymbolicLink() || !validatorStat.isFile()) {
+    throw new Error("Trusted routebook validator is unavailable");
+  }
+  const result = await params.runtime.system.runCommandWithTimeout(["bash", validator, target], {
+    cwd: workspace,
+    timeoutMs: 120_000,
+    maxOutputBytes: 128 * 1024,
+  });
+  if (result.code !== 0) {
+    throw new Error(`Routebook validator rejected Artifact with exit ${result.code ?? "signal"}`);
+  }
+  return { validatorId: "lushu-html-v1", contentSha256 };
+}

@@ -11,6 +11,7 @@ import { childSessionKey, type RunBinding, RunBindingStore } from "./bindings.js
 import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
 import { FlowosExecutionRuntime } from "./runtime.js";
+import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 const errorCodes = [
@@ -34,6 +35,11 @@ type ToolDeps = {
   locks: ExecutionLocks;
   runtime: FlowosExecutionRuntime;
   ownerAgentId: string;
+  validateArtifact: (params: {
+    spaceId: string;
+    filePath: string;
+    artifactType: "html" | "markdown";
+  }) => Promise<SpaceArtifactValidation>;
 };
 
 function requireSession(context: OpenClawPluginToolContext): string {
@@ -413,19 +419,28 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
-        if (binding.targetAgentId && binding.status !== "ENDED_OK") {
+        if (!binding.targetAgentId || binding.status !== "ENDED_OK") {
           throw new Error("FlowOS Execution child run has not ended successfully");
         }
         const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
         if (current.spaceId !== params.spaceId) {
           throw new Error("Space Artifact does not match the bound Execution space");
         }
+        if (current.stageKey !== "validating") {
+          throw new Error("FlowOS Execution is not in the validating stage");
+        }
+        const validation = await deps.validateArtifact({
+          spaceId: params.spaceId,
+          filePath: params.artifactFilePath,
+          artifactType: params.artifactType,
+        });
         const resultRef = await deps.client.registerSpaceArtifact(params.executionId, {
           attemptId: params.attemptId,
           expectedVersion: current.version,
           title: params.artifactTitle,
           filePath: params.artifactFilePath,
           artifactType: params.artifactType,
+          ...validation,
         });
         const item = await deps.client.complete({
           executionId: params.executionId,

@@ -10,6 +10,7 @@ import {
 import { getExecutionLocks } from "./src/locks.js";
 import { FlowosExecutionRuntime } from "./src/runtime.js";
 import { createFlowosExecutionTools } from "./src/tools.js";
+import { validateSpaceArtifact } from "./src/validation.js";
 
 const pluginId = "flowos-execution-runtime";
 const bindingNamespace = "run-bindings";
@@ -111,6 +112,17 @@ export default definePluginEntry({
               locks,
               runtime,
               ownerAgentId,
+              validateArtifact: (params) => {
+                const workspaceDir = context.workspaceDir?.trim();
+                if (!workspaceDir) {
+                  throw new Error("FlowOS Execution validator requires a trusted workspace");
+                }
+                return validateSpaceArtifact({
+                  runtime: api.runtime,
+                  workspaceDir,
+                  ...params,
+                });
+              },
             })
           : null,
       {
