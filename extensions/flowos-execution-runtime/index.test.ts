@@ -687,6 +687,17 @@ describe("FlowOS Execution typed hooks", () => {
     expect(assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
   });
 
+  it("fails closed after restart when a spawn claim was never accepted", async () => {
+    const ctx = runtime();
+    const value = await pending(ctx.bindings);
+    await ctx.instance.reconcile();
+    expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+      status: "SPAWN_FAILED",
+    });
+    expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+    expect(ctx.subagent.waitForRun).not.toHaveBeenCalled();
+  });
+
   it("timeout end maps to a retryable provider timeout failure", async () => {
     const ctx = runtime();
     const value = await pending(ctx.bindings);

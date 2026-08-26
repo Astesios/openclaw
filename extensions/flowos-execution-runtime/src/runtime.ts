@@ -98,6 +98,22 @@ export class FlowosExecutionRuntime {
 
   async reconcile(): Promise<void> {
     for (const binding of await this.bindings.canonicalEntries()) {
+      if (binding.status === "STARTING") {
+        await this.locks.run(binding.executionId, binding.attemptId, async () => {
+          const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+          if (current?.status !== "STARTING") {
+            return;
+          }
+          const pending: RunBinding = {
+            ...current,
+            status: "SPAWN_FAILED_PENDING_SYNC",
+            updatedAt: Date.now(),
+          };
+          await this.bindings.save(pending);
+          await this.syncSpawnFailureLocked(pending);
+        });
+        continue;
+      }
       if (binding.status === "SPAWN_FAILED_PENDING_SYNC") {
         await this.locks.run(binding.executionId, binding.attemptId, async () => {
           const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
@@ -116,21 +132,8 @@ export class FlowosExecutionRuntime {
         });
         continue;
       }
-      if (
-        (binding.status !== "RUNNING" && binding.status !== "STARTING") ||
-        !binding.runId ||
-        !binding.childSessionKey
-      ) {
+      if (binding.status !== "RUNNING" || !binding.runId || !binding.childSessionKey) {
         continue;
-      }
-      if (binding.status === "STARTING") {
-        const detail = await this.client.detail(binding.executionId).catch(() => undefined);
-        if (detail && !activeStatuses.has(detail.status)) {
-          await this.bindings
-            .save({ ...binding, status: "SPAWN_FAILED", updatedAt: Date.now() })
-            .catch(() => undefined);
-          continue;
-        }
       }
       const result = await this.subagent
         .waitForRun({ runId: binding.runId, timeoutMs: 1 })
