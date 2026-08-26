@@ -219,8 +219,8 @@ describe("FlowOS Execution plugin boundaries", () => {
       attemptId: "attempt-1",
       requesterSessionKey: "agent:main:main",
       ownerAgentId: "agent:main",
-      targetAgentId: "worker",
-      childSessionKey: "agent:worker:subagent:flowos-1",
+      targetAgentId: "main",
+      childSessionKey: "agent:main:subagent:flowos-1",
       runId: "run-1",
       status: "RUNNING",
       createdAt: 1,
@@ -230,7 +230,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     const child = tools({
       bindings: store,
       client: assist.client,
-      context: { agentId: "worker", sessionKey: binding.childSessionKey },
+      context: { agentId: "main", sessionKey: binding.childSessionKey },
     });
     await child.byName.get("flowos_execution_stage")?.execute("stage", {
       executionId: "execution-1",

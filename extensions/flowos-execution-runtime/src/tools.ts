@@ -4,6 +4,7 @@ import type {
   OpenClawPluginApi,
   OpenClawPluginToolContext,
 } from "openclaw/plugin-sdk/plugin-entry";
+import { isSubagentSessionKey } from "openclaw/plugin-sdk/routing";
 import { Type } from "typebox";
 import { childSessionKey, type RunBinding, RunBindingStore } from "./bindings.js";
 import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
@@ -47,10 +48,11 @@ function contextAgentId(context: OpenClawPluginToolContext): string {
 }
 
 function requireOwnerContext(context: OpenClawPluginToolContext, ownerAgentId: string): string {
-  if (contextAgentId(context) !== ownerAgentId) {
+  const sessionKey = requireSession(context);
+  if (isSubagentSessionKey(sessionKey) || contextAgentId(context) !== ownerAgentId) {
     throw new Error("FlowOS Execution owner tool is unavailable to this agent");
   }
-  return requireSession(context);
+  return sessionKey;
 }
 
 function requireOwnerBinding(binding: RunBinding, sessionKey: string, ownerAgentId: string): void {
@@ -66,6 +68,21 @@ async function requireStageBinding(
 ): Promise<RunBinding> {
   const sessionKey = requireSession(deps.context);
   const agentId = contextAgentId(deps.context);
+  const childBinding = await deps.bindings.byChild(sessionKey);
+  if (childBinding) {
+    const childAgentId = agentId.startsWith("agent:") ? agentId.slice("agent:".length) : agentId;
+    if (
+      childBinding.executionId !== executionId ||
+      childBinding.targetAgentId !== childAgentId ||
+      childBinding.status !== "RUNNING"
+    ) {
+      throw new Error("child progress capability is unavailable or does not match this Execution");
+    }
+    if (attemptId && childBinding.attemptId !== attemptId) {
+      throw new Error("child progress capability does not match this Attempt");
+    }
+    return childBinding;
+  }
   if (agentId === deps.ownerAgentId) {
     if (!attemptId) {
       throw new Error("owner stage requires attemptId");
@@ -77,20 +94,7 @@ async function requireStageBinding(
     requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
     return binding;
   }
-  const binding = await deps.bindings.byChild(sessionKey);
-  const childAgentId = agentId.startsWith("agent:") ? agentId.slice("agent:".length) : agentId;
-  if (
-    !binding ||
-    binding.executionId !== executionId ||
-    binding.targetAgentId !== childAgentId ||
-    binding.status !== "RUNNING"
-  ) {
-    throw new Error("child progress capability is unavailable or does not match this Execution");
-  }
-  if (attemptId && binding.attemptId !== attemptId) {
-    throw new Error("child progress capability does not match this Attempt");
-  }
-  return binding;
+  throw new Error("child progress capability is unavailable or does not match this Execution");
 }
 
 async function requireCurrentExecution(
