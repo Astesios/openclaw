@@ -267,6 +267,26 @@ describe("flowos task-center auth", () => {
     ]);
   });
 
+  it("issues a dedicated device-onboarding confirmation token", async () => {
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
+    const { calls } = setup();
+    const [name, handler, options] = method(calls, "flowos.deviceOnboardingToken");
+    expect(name).toBe("flowos.deviceOnboardingToken");
+    expect(options).toEqual({ scope: "operator.read" });
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+    const claims = decodeClaims(respond.mock.calls[0][1].accessToken);
+    expect(respond.mock.calls[0][0]).toBe(true);
+    expect(claims).toMatchObject({
+      aud: "assist:device-onboarding",
+      sub: "user:alice",
+      tenantId: "tenant-a",
+      actorType: "USER",
+      scope: "device-onboarding:confirm",
+    });
+    expect(Number(claims.exp) - Number(claims.iat)).toBe(300);
+  });
+
   it("issues proactive-service tokens on their own audience", async () => {
     // ★ 单独 audience 是这条的全部意义:主动服务的读接口会吐 userRef、订单号,
     //   以及「这个人用哪些 App、什么时候在用」。一张任务中心的票不该顺带能拉走这些。

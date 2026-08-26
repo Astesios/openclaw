@@ -560,6 +560,13 @@ export default definePluginEntry({
     });
     registerUserTokenMethod(api, config, "flowos.taskCenterToken", "assist:task-center", []);
     registerUserTokenMethod(api, config, "flowos.miniAppToken", "assist:miniapps", miniAppScopes);
+    registerUserTokenMethod(
+      api,
+      config,
+      "flowos.deviceOnboardingToken",
+      "assist:device-onboarding",
+      ["device-onboarding:confirm"],
+    );
     // 主动服务(委托 / 事件入口 / 收件箱 / 入口审计)的用户主体票。
     // ★ 单独一个 audience,不复用 assist:task-center —— 凭据要按用途分域:
     //   一张任务中心的票不该顺带能拉走「这个人在关注什么、用哪些 App、什么时候在用」。
