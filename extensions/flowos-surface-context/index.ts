@@ -48,15 +48,41 @@ export default definePluginEntry({
   register(api) {
     const endpoint = resolveTrustedAssistEndpoint(process.env.ASSIST_API_BASE);
     const token = consumeRuntimeToken();
-    const runtime =
-      endpoint && token
-        ? new SurfaceContextRuntime(
-            new SurfaceContextClient(endpoint, token),
-            api.config,
-            Date.now,
-            sharedSurfaceContextRuntimeState(),
-          )
-        : null;
+    const surfaceClient = endpoint && token ? new SurfaceContextClient(endpoint, token) : null;
+    const runtime = surfaceClient
+      ? new SurfaceContextRuntime(
+          surfaceClient,
+          api.config,
+          Date.now,
+          sharedSurfaceContextRuntimeState(),
+        )
+      : null;
+
+    api.registerGatewayMethod(
+      "flowos.surfaceContext.status",
+      async ({ params, client, respond }) => {
+        if (!trustedOperator(client)) {
+          reject(respond, "INVALID_REQUEST", "paired operator device authentication required");
+          return;
+        }
+        if (Object.keys(params ?? {}).length > 0) {
+          reject(respond, "INVALID_REQUEST", "this method accepts no arguments");
+          return;
+        }
+        if (!surfaceClient) {
+          respond(true, { enabled: false });
+          return;
+        }
+        try {
+          respond(true, { enabled: await surfaceClient.status() });
+        } catch (error) {
+          const code = error instanceof SurfaceContextClientError ? error.code : "UNAVAILABLE";
+          api.logger.warn(`FlowOS Surface Context status unavailable code=${code}`);
+          respond(true, { enabled: false });
+        }
+      },
+      { scope: "operator.read" },
+    );
 
     api.registerGatewayMethod(
       "flowos.surfaceContext.bind",
@@ -136,8 +162,13 @@ export default definePluginEntry({
     });
 
     api.on("before_prompt_build", async (_event, context) => {
-      const prependContext = runtime ? buildPromptContext(runtime, context.sessionKey) : undefined;
+      const binding = runtime?.claimForRun(context.sessionKey, context.runId);
+      const prependContext = buildPromptContext(binding);
       return prependContext ? { prependContext } : undefined;
+    });
+
+    api.on("agent_end", async (event, context) => {
+      runtime?.endRun(context.sessionKey, event.runId ?? context.runId);
     });
 
     api.on("gateway_start", async () => {

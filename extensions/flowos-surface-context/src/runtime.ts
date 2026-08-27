@@ -13,11 +13,18 @@ type ActiveBinding = SurfaceContextBinding & {
 
 export type SurfaceContextRuntimeState = {
   bindings: Map<string, ActiveBinding>;
+  activeRuns: Map<string, ActiveBinding & { runId: string }>;
   generations: Map<string, number>;
+  inFlightBindings: Map<string, number>;
 };
 
 export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
-  return { bindings: new Map(), generations: new Map() };
+  return {
+    bindings: new Map(),
+    activeRuns: new Map(),
+    generations: new Map(),
+    inFlightBindings: new Map(),
+  };
 }
 
 export function sharedSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
@@ -82,48 +89,142 @@ export class SurfaceContextRuntime {
     return generation;
   }
 
+  private sweepExpired(): void {
+    const now = this.now();
+    for (const [key, binding] of this.state.bindings) {
+      if (binding.expiresAtMs <= now) {
+        this.state.bindings.delete(key);
+      }
+    }
+    for (const [key, binding] of this.state.activeRuns) {
+      if (binding.expiresAtMs <= now) {
+        this.state.activeRuns.delete(key);
+      }
+    }
+    for (const key of this.state.generations.keys()) {
+      if (
+        !this.state.bindings.has(key) &&
+        !this.state.activeRuns.has(key) &&
+        !this.state.inFlightBindings.has(key)
+      ) {
+        this.state.generations.delete(key);
+      }
+    }
+  }
+
+  private beginBind(sessionKey: string): void {
+    this.state.inFlightBindings.set(
+      sessionKey,
+      (this.state.inFlightBindings.get(sessionKey) ?? 0) + 1,
+    );
+  }
+
+  private endBind(sessionKey: string): void {
+    const remaining = (this.state.inFlightBindings.get(sessionKey) ?? 1) - 1;
+    if (remaining > 0) {
+      this.state.inFlightBindings.set(sessionKey, remaining);
+    } else {
+      this.state.inFlightBindings.delete(sessionKey);
+    }
+  }
+
   async bind(rawSessionKey: string, contextRef: string): Promise<ActiveBinding> {
+    this.sweepExpired();
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
     if (!sessionKey) {
       throw new Error("CONTEXT_SESSION_INVALID");
     }
     const generation = this.bump(sessionKey);
-    const binding = await this.client.consume(contextRef, rawSessionKey);
-    if (this.state.generations.get(sessionKey) !== generation) {
-      throw new Error("CONTEXT_STALE_BIND");
+    this.beginBind(sessionKey);
+    try {
+      const binding = await this.client.consume(contextRef, rawSessionKey);
+      if (this.state.generations.get(sessionKey) !== generation) {
+        throw new Error("CONTEXT_STALE_BIND");
+      }
+      const expiresAtMs = Date.parse(binding.expiresAt);
+      if (!Number.isFinite(expiresAtMs) || expiresAtMs <= this.now()) {
+        throw new Error("CONTEXT_EXPIRED");
+      }
+      if (
+        !this.state.bindings.has(sessionKey) &&
+        !this.state.activeRuns.has(sessionKey) &&
+        this.state.bindings.size + this.state.activeRuns.size >= maxBindings
+      ) {
+        throw new Error("CONTEXT_BINDING_LIMIT_REACHED");
+      }
+      const active = { ...binding, expiresAtMs };
+      // 新页面 Ref 先撤销当前 run 的旧对象；旧工具调用随后只能得到 unavailable。
+      this.state.activeRuns.delete(sessionKey);
+      this.state.bindings.set(sessionKey, active);
+      return active;
+    } finally {
+      this.endBind(sessionKey);
     }
-    const expiresAtMs = Date.parse(binding.expiresAt);
-    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= this.now()) {
-      throw new Error("CONTEXT_EXPIRED");
-    }
-    if (!this.state.bindings.has(sessionKey) && this.state.bindings.size >= maxBindings) {
-      throw new Error("CONTEXT_BINDING_LIMIT_REACHED");
-    }
-    const active = { ...binding, expiresAtMs };
-    this.state.bindings.set(sessionKey, active);
-    return active;
   }
 
   clear(rawSessionKey: string): boolean {
+    this.sweepExpired();
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
     this.bump(sessionKey);
-    return this.state.bindings.delete(sessionKey);
+    const pending = this.state.bindings.delete(sessionKey);
+    const active = this.state.activeRuns.delete(sessionKey);
+    return pending || active;
   }
 
   active(rawSessionKey: string | undefined): ActiveBinding | undefined {
+    this.sweepExpired();
     if (!rawSessionKey) {
       return undefined;
     }
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
-    const binding = this.state.bindings.get(sessionKey);
+    const binding = this.state.activeRuns.get(sessionKey);
     if (!binding) {
       return undefined;
     }
     if (binding.expiresAtMs <= this.now()) {
-      this.state.bindings.delete(sessionKey);
+      this.state.activeRuns.delete(sessionKey);
       return undefined;
     }
     return binding;
+  }
+
+  claimForRun(
+    rawSessionKey: string | undefined,
+    runId: string | undefined,
+  ): ActiveBinding | undefined {
+    this.sweepExpired();
+    if (!rawSessionKey || !runId) {
+      return undefined;
+    }
+    const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    const current = this.state.activeRuns.get(sessionKey);
+    if (current?.runId === runId) {
+      return current;
+    }
+    if (current) {
+      this.state.activeRuns.delete(sessionKey);
+    }
+    const pending = this.state.bindings.get(sessionKey);
+    if (!pending) {
+      return undefined;
+    }
+    this.state.bindings.delete(sessionKey);
+    this.state.activeRuns.set(sessionKey, { ...pending, runId });
+    return pending;
+  }
+
+  endRun(rawSessionKey: string | undefined, runId: string | undefined): void {
+    this.sweepExpired();
+    if (!rawSessionKey || !runId) {
+      return;
+    }
+    const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    if (this.state.activeRuns.get(sessionKey)?.runId === runId) {
+      this.state.activeRuns.delete(sessionKey);
+      if (!this.state.bindings.has(sessionKey)) {
+        this.state.generations.delete(sessionKey);
+      }
+    }
   }
 }
 
@@ -181,11 +282,7 @@ export function createSurfaceContextTools(
   return [status, resolve];
 }
 
-export function buildPromptContext(
-  runtime: SurfaceContextRuntime,
-  sessionKey?: string,
-): string | undefined {
-  const binding = runtime.active(sessionKey);
+export function buildPromptContext(binding: ActiveBinding | undefined): string | undefined {
   if (!binding) {
     return undefined;
   }

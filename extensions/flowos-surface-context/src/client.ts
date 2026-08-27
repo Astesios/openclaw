@@ -195,6 +195,72 @@ export class SurfaceContextClient {
     private readonly token: string,
   ) {}
 
+  async status(): Promise<boolean> {
+    return await new Promise((resolve, rejectRequest) => {
+      const request = httpRequest(
+        {
+          protocol: this.endpoint.protocol,
+          hostname: this.endpoint.hostname,
+          port: this.endpoint.port,
+          method: "GET",
+          path: "/api/surface-context/status",
+          headers: {
+            authorization: `Bearer ${this.token}`,
+            accept: "application/json",
+          },
+          timeout: 5_000,
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on("data", (chunk: Buffer | string) => {
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            size += bytes.length;
+            if (size > maxResponseBytes) {
+              request.destroy(new Error("Assist response exceeds 16384 bytes"));
+              return;
+            }
+            chunks.push(bytes);
+          });
+          response.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            const status = response.statusCode ?? 0;
+            if (status < 200 || status >= 300) {
+              rejectRequest(
+                new SurfaceContextClientError(
+                  safeErrorCode(text),
+                  `Assist returned HTTP ${status}`,
+                ),
+              );
+              return;
+            }
+            try {
+              const parsed = JSON.parse(text) as unknown;
+              if (
+                !parsed ||
+                typeof parsed !== "object" ||
+                Array.isArray(parsed) ||
+                !exactKeys(parsed as Record<string, unknown>, ["enabled"]) ||
+                typeof (parsed as { enabled?: unknown }).enabled !== "boolean"
+              ) {
+                throw new SurfaceContextClientError(
+                  "CONTEXT_RESPONSE_INVALID",
+                  "invalid status response",
+                );
+              }
+              resolve((parsed as { enabled: boolean }).enabled);
+            } catch (error) {
+              rejectRequest(error);
+            }
+          });
+        },
+      );
+      request.on("timeout", () => request.destroy(new Error("Assist request timed out")));
+      request.on("error", rejectRequest);
+      request.end();
+    });
+  }
+
   async consume(contextRef: string, sessionKey: string): Promise<SurfaceContextBinding> {
     const body = JSON.stringify({ contextRef, sessionKey });
     return await new Promise((resolve, rejectRequest) => {
