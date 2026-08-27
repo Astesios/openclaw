@@ -423,7 +423,7 @@ function registerUserTokenMethod(
   name: string,
   audience: string,
   scopes: readonly string[],
-  requiredScope = "operator.read",
+  requiredScope: "operator.read" | "operator.admin" = "operator.read",
   requireOperatorRole = false,
 ): void {
   api.registerGatewayMethod(
@@ -664,6 +664,13 @@ export default definePluginEntry({
       maxEntries: 1024,
     });
     registerUserTokenMethod(api, config, "flowos.taskCenterToken", "assist:task-center", []);
+    registerUserTokenMethod(
+      api,
+      config,
+      "flowos.surfaceContextToken",
+      "assist:surface-context",
+      [],
+    );
     registerUserTokenMethod(api, config, "flowos.miniAppToken", "assist:miniapps", miniAppScopes);
     registerUserTokenMethod(
       api,

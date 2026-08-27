@@ -287,6 +287,24 @@ describe("flowos task-center auth", () => {
     ]);
   });
 
+  it("issues a dedicated Surface Context user token", async () => {
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
+    const { calls } = setup();
+    const [name, handler, options] = method(calls, "flowos.surfaceContextToken");
+    expect(name).toBe("flowos.surfaceContextToken");
+    expect(options).toEqual({ scope: "operator.read" });
+    const respond = vi.fn();
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+    const claims = decodeClaims(respond.mock.calls[0][1].accessToken);
+    expect(claims).toMatchObject({
+      aud: "assist:surface-context",
+      sub: "user:alice",
+      tenantId: "tenant-a",
+      actorType: "USER",
+      scope: "",
+    });
+  });
+
   it("issues a dedicated device-onboarding confirmation token", async () => {
     process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
     const { calls } = setup();
