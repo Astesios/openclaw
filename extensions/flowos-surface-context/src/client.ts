@@ -28,6 +28,8 @@ export type SurfaceContextBinding = {
   context: SurfaceContextBrief;
 };
 
+export type SurfaceContextAvailability = "DISABLED" | "ENABLED";
+
 export class SurfaceContextClientError extends Error {
   constructor(
     readonly code: string,
@@ -195,7 +197,7 @@ export class SurfaceContextClient {
     private readonly token: string,
   ) {}
 
-  async status(): Promise<boolean> {
+  async status(): Promise<SurfaceContextAvailability> {
     return await new Promise((resolve, rejectRequest) => {
       const request = httpRequest(
         {
@@ -240,15 +242,16 @@ export class SurfaceContextClient {
                 !parsed ||
                 typeof parsed !== "object" ||
                 Array.isArray(parsed) ||
-                !exactKeys(parsed as Record<string, unknown>, ["enabled"]) ||
-                typeof (parsed as { enabled?: unknown }).enabled !== "boolean"
+                !exactKeys(parsed as Record<string, unknown>, ["state"]) ||
+                ((parsed as { state?: unknown }).state !== "DISABLED" &&
+                  (parsed as { state?: unknown }).state !== "ENABLED")
               ) {
                 throw new SurfaceContextClientError(
                   "CONTEXT_RESPONSE_INVALID",
                   "invalid status response",
                 );
               }
-              resolve((parsed as { enabled: boolean }).enabled);
+              resolve((parsed as { state: SurfaceContextAvailability }).state);
             } catch (error) {
               rejectRequest(error);
             }
@@ -261,8 +264,12 @@ export class SurfaceContextClient {
     });
   }
 
-  async consume(contextRef: string, sessionKey: string): Promise<SurfaceContextBinding> {
-    const body = JSON.stringify({ contextRef, sessionKey });
+  async consume(
+    contextRef: string,
+    sessionKey: string,
+    turnId: string,
+  ): Promise<SurfaceContextBinding> {
+    const body = JSON.stringify({ contextRef, sessionKey, turnId });
     return await new Promise((resolve, rejectRequest) => {
       const request = httpRequest(
         {

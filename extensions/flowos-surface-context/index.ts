@@ -70,15 +70,15 @@ export default definePluginEntry({
           return;
         }
         if (!surfaceClient) {
-          respond(true, { enabled: false });
+          respond(true, { state: token ? "UNAVAILABLE" : "DISABLED" });
           return;
         }
         try {
-          respond(true, { enabled: await surfaceClient.status() });
+          respond(true, { state: await surfaceClient.status() });
         } catch (error) {
           const code = error instanceof SurfaceContextClientError ? error.code : "UNAVAILABLE";
           api.logger.warn(`FlowOS Surface Context status unavailable code=${code}`);
-          respond(true, { enabled: false });
+          respond(true, { state: "UNAVAILABLE" });
         }
       },
       { scope: "operator.read" },
@@ -94,13 +94,18 @@ export default definePluginEntry({
         }
         const input = params ?? {};
         if (
-          Object.keys(input).toSorted().join(",") !== "contextRef,sessionKey" ||
+          Object.keys(input).toSorted().join(",") !== "contextRef,sessionKey,turnId" ||
           !normalizedString(input.contextRef, 2048) ||
           !normalizedString(input.sessionKey, 512) ||
-          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(String(input.sessionKey))
+          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(String(input.sessionKey)) ||
+          !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(normalizedString(input.turnId, 128))
         ) {
           api.logger.warn("FlowOS Surface Context bind rejected: invalid pointer-only request");
-          reject(respond, "INVALID_REQUEST", "valid ContextRef and sessionKey are required");
+          reject(
+            respond,
+            "INVALID_REQUEST",
+            "valid ContextRef, sessionKey and turnId are required",
+          );
           return;
         }
         if (!runtime) {
@@ -109,7 +114,11 @@ export default definePluginEntry({
           return;
         }
         try {
-          const binding = await runtime.bind(String(input.sessionKey), String(input.contextRef));
+          const binding = await runtime.bind(
+            String(input.sessionKey),
+            String(input.contextRef),
+            String(input.turnId),
+          );
           api.logger.info(
             `FlowOS Surface Context bound session=${sessionAuditHash(String(input.sessionKey))} objectType=${binding.context.objectType}`,
           );
@@ -143,16 +152,22 @@ export default definePluginEntry({
         }
         const input = params ?? {};
         const sessionKey = normalizedString(input.sessionKey, 512);
+        const turnId = normalizedString(input.turnId, 128);
+        const keys = Object.keys(input).toSorted().join(",");
         if (
-          Object.keys(input).length !== 1 ||
+          (keys !== "sessionKey" && keys !== "sessionKey,turnId") ||
           !sessionKey ||
-          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(sessionKey)
+          !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(sessionKey) ||
+          (keys === "sessionKey,turnId" && !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(turnId))
         ) {
           reject(respond, "INVALID_REQUEST", "valid sessionKey is required");
           return;
         }
         const canonical = canonicalSessionKey(api.config, sessionKey);
-        respond(true, { cleared: runtime?.clear(sessionKey) ?? false, sessionKey: canonical });
+        respond(true, {
+          cleared: runtime?.clear(sessionKey, turnId || undefined) ?? false,
+          sessionKey: canonical,
+        });
       },
       { scope: "operator.write" },
     );
@@ -165,6 +180,32 @@ export default definePluginEntry({
       const binding = runtime?.claimForRun(context.sessionKey, context.runId);
       const prependContext = buildPromptContext(binding);
       return prependContext ? { prependContext } : undefined;
+    });
+
+    api.on("before_tool_call", async (event, context) => {
+      if (
+        event.toolName !== "surface_context_status" &&
+        event.toolName !== "surface_context_resolve"
+      ) {
+        return;
+      }
+      const authorized = runtime?.authorizeTool(
+        context.sessionKey,
+        event.runId ?? context.runId,
+        event.toolCallId,
+      );
+      if (!authorized) {
+        return { block: true, blockReason: "CONTEXT_UNAVAILABLE" };
+      }
+    });
+
+    api.on("after_tool_call", async (event) => {
+      if (
+        event.toolName === "surface_context_status" ||
+        event.toolName === "surface_context_resolve"
+      ) {
+        runtime?.clearToolCall(event.toolCallId);
+      }
     });
 
     api.on("agent_end", async (event, context) => {

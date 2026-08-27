@@ -119,7 +119,7 @@ describe("Surface Context Assist client", () => {
     const server = createServer((request, response) => {
       requestUrl = request.url ?? "";
       response.writeHead(200, { "content-type": "application/json" });
-      response.end('{"enabled":true}');
+      response.end('{"state":"ENABLED"}');
     });
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -127,7 +127,7 @@ describe("Surface Context Assist client", () => {
     const port = (server.address() as AddressInfo).port;
     try {
       const client = new SurfaceContextClient(new URL(`http://127.0.0.1:${port}`), "runtime-token");
-      await expect(client.status()).resolves.toBe(true);
+      await expect(client.status()).resolves.toBe("ENABLED");
       expect(requestUrl).toBe("/api/surface-context/status");
     } finally {
       await new Promise<void>((resolve, reject) => {
@@ -153,6 +153,7 @@ describe("Surface Context Assist client", () => {
         expect(JSON.parse(Buffer.concat(chunks).toString("utf8"))).toEqual({
           contextRef: "context-ref-secret",
           sessionKey: "main",
+          turnId: "run-0123456789abcdef",
         });
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(binding()));
@@ -164,7 +165,9 @@ describe("Surface Context Assist client", () => {
     const port = (server.address() as AddressInfo).port;
     try {
       const client = new SurfaceContextClient(new URL(`http://127.0.0.1:${port}`), "runtime-token");
-      await expect(client.consume("context-ref-secret", "main")).resolves.toMatchObject({
+      await expect(
+        client.consume("context-ref-secret", "main", "run-0123456789abcdef"),
+      ).resolves.toMatchObject({
         context: { spaceId: "sp_trip", title: "关西旅行" },
       });
       expect(requestUrl).toBe("/api/surface-context/refs:consume");
@@ -199,11 +202,13 @@ describe("Surface Context Assist client", () => {
     const port = (server.address() as AddressInfo).port;
     const client = new SurfaceContextClient(new URL(`http://127.0.0.1:${port}`), "runtime-token");
     try {
-      await expect(client.consume("ref", "main")).rejects.toMatchObject({
+      await expect(client.consume("ref", "main", "run-0123456789abcdef")).rejects.toMatchObject({
         code: "CONTEXT_ASSIST_REJECTED",
       });
       responseBody = { ...binding(), filePath: "/private/space" };
-      await expect(client.consume("ref", "main")).rejects.toBeInstanceOf(SurfaceContextClientError);
+      await expect(client.consume("ref", "main", "run-0123456789abcdef")).rejects.toBeInstanceOf(
+        SurfaceContextClientError,
+      );
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -225,14 +230,15 @@ describe("session-bound runtime", () => {
       session: { mainKey: "main" },
       agents: { list: [{ id: "main", default: true }] },
     });
-    await runtime.bind("main", "secret-ref");
-    expect(consume).toHaveBeenCalledWith("secret-ref", "main");
-    expect(runtime.active("agent:main:main")).toBeUndefined();
+    await runtime.bind("main", "secret-ref", "run-1");
+    expect(consume).toHaveBeenCalledWith("secret-ref", "main", "run-1");
+    expect(runtime.active("agent:main:main", "run-1")).toBeUndefined();
     runtime.claimForRun("agent:main:main", "run-1");
-    expect(runtime.active("agent:main:main")?.context.spaceId).toBe("sp_trip");
-    expect(runtime.active("agent:main:other")).toBeUndefined();
+    expect(runtime.active("agent:main:main", "run-1")?.context.spaceId).toBe("sp_trip");
+    expect(runtime.active("agent:main:main", "run-other")).toBeUndefined();
+    expect(runtime.active("agent:main:other", "run-1")).toBeUndefined();
     expect(runtime.clear("main")).toBe(true);
-    expect(runtime.active("agent:main:main")).toBeUndefined();
+    expect(runtime.active("agent:main:main", "run-1")).toBeUndefined();
   });
 
   it("shares process-memory bindings across Gateway and Agent plugin registries", async () => {
@@ -250,9 +256,9 @@ describe("session-bound runtime", () => {
       Date.now,
       state,
     );
-    await gatewayRuntime.bind("session_123", "ref");
+    await gatewayRuntime.bind("session_123", "ref", "run-1");
     agentRuntime.claimForRun("agent:main:session_123", "run-1");
-    expect(agentRuntime.active("agent:main:session_123")?.context.spaceId).toBe("sp_trip");
+    expect(agentRuntime.active("agent:main:session_123", "run-1")?.context.spaceId).toBe("sp_trip");
   });
 
   it("does not let an older async bind overwrite a newer clear", async () => {
@@ -266,11 +272,11 @@ describe("session-bound runtime", () => {
     const runtime = new SurfaceContextRuntime({ consume } as unknown as SurfaceContextClient, {
       agents: { list: [{ id: "main", default: true }] },
     });
-    const pending = runtime.bind("main", "ref");
+    const pending = runtime.bind("main", "ref", "run-1");
     runtime.clear("main");
     finish?.(binding());
     await expect(pending).rejects.toThrow("CONTEXT_STALE_BIND");
-    expect(runtime.active("main")).toBeUndefined();
+    expect(runtime.active("main", "run-1")).toBeUndefined();
   });
 
   it("expires bindings and exposes tools with no ref or identity arguments", async () => {
@@ -281,15 +287,17 @@ describe("session-bound runtime", () => {
       { agents: { list: [{ id: "main", default: true }] } },
       () => now,
     );
-    await runtime.bind("main", "ref");
+    await runtime.bind("main", "ref", "run-1");
     runtime.claimForRun("agent:main:main", "run-1");
     const tools = createSurfaceContextTools(runtime, { sessionKey: "agent:main:main" } as never);
     for (const tool of tools) {
       expect(tool.parameters).toMatchObject({ additionalProperties: false, properties: {} });
     }
+    expect(runtime.authorizeTool("agent:main:main", "run-1", "call-1")).toBe(true);
     const resolved = await tools[1]?.execute("call-1", {});
     expect(JSON.stringify(resolved)).toContain("sp_trip");
     now += 1_001;
+    expect(runtime.authorizeTool("agent:main:main", "run-1", "call-2")).toBe(false);
     const status = await tools[0]?.execute("call-2", {});
     expect(JSON.stringify(status)).toContain("CONTEXT_UNAVAILABLE");
   });
@@ -299,7 +307,7 @@ describe("session-bound runtime", () => {
       { consume: vi.fn(async () => binding()) } as unknown as SurfaceContextClient,
       { agents: { list: [{ id: "main", default: true }] } },
     );
-    await runtime.bind("main", "super-secret-ref");
+    await runtime.bind("main", "super-secret-ref", "run-1");
     const prompt = buildPromptContext(runtime.claimForRun("agent:main:main", "run-1")) ?? "";
     expect(prompt).toContain("surface_context_resolve");
     for (const forbidden of ["super-secret-ref", "sp_trip", "关西旅行", "旅行、黄金样例"]) {
@@ -312,12 +320,62 @@ describe("session-bound runtime", () => {
       { consume: vi.fn(async () => binding()) } as unknown as SurfaceContextClient,
       { agents: { list: [{ id: "main", default: true }] } },
     );
-    await runtime.bind("main", "ref");
-    expect(runtime.claimForRun("agent:main:main", "run-1")?.context.spaceId).toBe("sp_trip");
-    expect(runtime.claimForRun("agent:main:main", "run-1")?.context.spaceId).toBe("sp_trip");
-    runtime.endRun("agent:main:main", "run-1");
-    expect(runtime.active("agent:main:main")).toBeUndefined();
+    await runtime.bind("main", "ref", "run-expected");
+    expect(runtime.claimForRun("agent:main:main", "run-sibling")).toBeUndefined();
+    expect(runtime.authorizeTool("agent:main:main", "run-sibling", "call-sibling")).toBe(false);
+    expect(runtime.claimForRun("agent:main:main", "run-expected")?.context.spaceId).toBe("sp_trip");
+    expect(runtime.claimForRun("agent:main:main", "run-expected")?.context.spaceId).toBe("sp_trip");
+    runtime.endRun("agent:main:main", "run-expected");
+    expect(runtime.active("agent:main:main", "run-expected")).toBeUndefined();
     expect(runtime.claimForRun("agent:main:main", "run-2")).toBeUndefined();
+  });
+
+  it("keeps a newer in-flight bind generation when the old run ends", async () => {
+    let finishSecond: ((value: SurfaceContextBinding) => void) | undefined;
+    let consumeCount = 0;
+    const consume = vi.fn(async () => {
+      consumeCount += 1;
+      if (consumeCount === 1) {
+        return binding();
+      }
+      return await new Promise<SurfaceContextBinding>((resolve) => {
+        finishSecond = resolve;
+      });
+    });
+    const runtime = new SurfaceContextRuntime({ consume } as unknown as SurfaceContextClient, {
+      agents: { list: [{ id: "main", default: true }] },
+    });
+    await runtime.bind("main", "ref-a", "run-a");
+    runtime.claimForRun("main", "run-a");
+    const pending = runtime.bind("main", "ref-b", "run-b");
+    runtime.endRun("main", "run-a");
+    finishSecond?.(binding());
+    await expect(pending).resolves.toMatchObject({ context: { spaceId: "sp_trip" } });
+    expect(runtime.claimForRun("main", "run-b")?.context.spaceId).toBe("sp_trip");
+  });
+
+  it("does not let an old turn rejection cancel a newer in-flight bind", async () => {
+    let finishSecond: ((value: SurfaceContextBinding) => void) | undefined;
+    let consumeCount = 0;
+    const consume = vi.fn(async () => {
+      consumeCount += 1;
+      if (consumeCount === 1) {
+        return binding();
+      }
+      return await new Promise<SurfaceContextBinding>((resolve) => {
+        finishSecond = resolve;
+      });
+    });
+    const runtime = new SurfaceContextRuntime({ consume } as unknown as SurfaceContextClient, {
+      agents: { list: [{ id: "main", default: true }] },
+    });
+    await runtime.bind("main", "ref-a", "run-a");
+    runtime.claimForRun("main", "run-a");
+    const pending = runtime.bind("main", "ref-b", "run-b");
+    expect(runtime.clear("main", "run-a")).toBe(true);
+    finishSecond?.(binding());
+    await expect(pending).resolves.toMatchObject({ context: { spaceId: "sp_trip" } });
+    expect(runtime.claimForRun("main", "run-b")?.context.spaceId).toBe("sp_trip");
   });
 });
 
@@ -334,15 +392,82 @@ describe("plugin registration", () => {
       names: ["surface_context_status", "surface_context_resolve"],
     });
     expect(on.mock.calls.some((call) => call[0] === "before_prompt_build")).toBe(true);
+    expect(on.mock.calls.some((call) => call[0] === "before_tool_call")).toBe(true);
+    expect(on.mock.calls.some((call) => call[0] === "after_tool_call")).toBe(true);
     expect(on.mock.calls.some((call) => call[0] === "agent_end")).toBe(true);
     const statusHandler = registerGatewayMethod.mock.calls[0]?.[1];
     const statusRespond = vi.fn();
     await statusHandler({ params: {}, client: pairedOperator(), respond: statusRespond });
-    expect(statusRespond).toHaveBeenCalledWith(true, { enabled: false });
+    expect(statusRespond).toHaveBeenCalledWith(true, { state: "DISABLED" });
     const bindHandler = registerGatewayMethod.mock.calls[1]?.[1];
     const respond = vi.fn();
     await bindHandler({ params: {}, client: pairedOperator(), respond });
     expect(respond.mock.calls[0]?.[2]).toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("reports configured Assist failures as unavailable, never disabled", async () => {
+    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    vi.spyOn(SurfaceContextClient.prototype, "status").mockRejectedValue(
+      new SurfaceContextClientError("CONTEXT_ASSIST_REJECTED", "Assist unavailable"),
+    );
+    const { registerGatewayMethod } = setupPlugin();
+    const statusHandler = registerGatewayMethod.mock.calls[0]?.[1];
+    const respond = vi.fn();
+    await statusHandler({ params: {}, client: pairedOperator(), respond });
+    expect(respond).toHaveBeenCalledWith(true, { state: "UNAVAILABLE" });
+  });
+
+  it("lets only the bound chat run claim prompt and tool access", async () => {
+    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    vi.spyOn(SurfaceContextClient.prototype, "consume").mockResolvedValue(binding());
+    const { registerGatewayMethod, registerTool, on } = setupPlugin();
+    const bindHandler = registerGatewayMethod.mock.calls[1]?.[1];
+    const bindRespond = vi.fn();
+    await bindHandler({
+      params: {
+        contextRef: "r".repeat(40),
+        sessionKey: "main",
+        turnId: "run-expected-01234567",
+      },
+      client: pairedOperator(),
+      respond: bindRespond,
+    });
+    expect(bindRespond.mock.calls[0]?.[0]).toBe(true);
+
+    const beforePrompt = on.mock.calls.find((call) => call[0] === "before_prompt_build")?.[1];
+    await expect(
+      beforePrompt({}, { sessionKey: "agent:main:main", runId: "run-sibling-0123456" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      beforePrompt({}, { sessionKey: "agent:main:main", runId: "run-expected-01234567" }),
+    ).resolves.toMatchObject({ prependContext: expect.stringContaining("flowos_surface_context") });
+
+    const beforeTool = on.mock.calls.find((call) => call[0] === "before_tool_call")?.[1];
+    await expect(
+      beforeTool(
+        {
+          toolName: "surface_context_resolve",
+          runId: "run-sibling-0123456",
+          toolCallId: "call-sibling",
+        },
+        { sessionKey: "agent:main:main" },
+      ),
+    ).resolves.toMatchObject({ block: true, blockReason: "CONTEXT_UNAVAILABLE" });
+    await expect(
+      beforeTool(
+        {
+          toolName: "surface_context_resolve",
+          runId: "run-expected-01234567",
+          toolCallId: "call-expected",
+        },
+        { sessionKey: "agent:main:main" },
+      ),
+    ).resolves.toBeUndefined();
+
+    const toolFactory = registerTool.mock.calls[0]?.[0];
+    const tools = toolFactory({ sessionKey: "agent:main:main" });
+    const resolved = await tools[1]?.execute("call-expected", {});
+    expect(JSON.stringify(resolved)).toContain("sp_trip");
   });
 });
 

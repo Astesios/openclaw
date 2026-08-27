@@ -11,11 +11,16 @@ type ActiveBinding = SurfaceContextBinding & {
   expiresAtMs: number;
 };
 
+type PendingBinding = ActiveBinding & { runId: string };
+type ToolAuthorization = ActiveBinding & { sessionKey: string; runId: string };
+
 export type SurfaceContextRuntimeState = {
-  bindings: Map<string, ActiveBinding>;
+  bindings: Map<string, PendingBinding>;
   activeRuns: Map<string, ActiveBinding & { runId: string }>;
   generations: Map<string, number>;
-  inFlightBindings: Map<string, number>;
+  inFlightBindings: Map<string, Set<string>>;
+  cancelledRuns: Set<string>;
+  toolAuthorizations: Map<string, ToolAuthorization>;
 };
 
 export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
@@ -24,6 +29,8 @@ export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
     activeRuns: new Map(),
     generations: new Map(),
     inFlightBindings: new Map(),
+    cancelledRuns: new Set(),
+    toolAuthorizations: new Map(),
   };
 }
 
@@ -101,6 +108,11 @@ export class SurfaceContextRuntime {
         this.state.activeRuns.delete(key);
       }
     }
+    for (const [key, authorization] of this.state.toolAuthorizations) {
+      if (authorization.expiresAtMs <= now) {
+        this.state.toolAuthorizations.delete(key);
+      }
+    }
     for (const key of this.state.generations.keys()) {
       if (
         !this.state.bindings.has(key) &&
@@ -112,32 +124,41 @@ export class SurfaceContextRuntime {
     }
   }
 
-  private beginBind(sessionKey: string): void {
-    this.state.inFlightBindings.set(
-      sessionKey,
-      (this.state.inFlightBindings.get(sessionKey) ?? 0) + 1,
-    );
+  private runKey(sessionKey: string, runId: string): string {
+    return `${sessionKey}\u0000${runId}`;
   }
 
-  private endBind(sessionKey: string): void {
-    const remaining = (this.state.inFlightBindings.get(sessionKey) ?? 1) - 1;
-    if (remaining > 0) {
-      this.state.inFlightBindings.set(sessionKey, remaining);
-    } else {
+  private beginBind(sessionKey: string, runId: string): void {
+    const runs = this.state.inFlightBindings.get(sessionKey) ?? new Set<string>();
+    runs.add(runId);
+    this.state.inFlightBindings.set(sessionKey, runs);
+  }
+
+  private endBind(sessionKey: string, runId: string): void {
+    const runs = this.state.inFlightBindings.get(sessionKey);
+    runs?.delete(runId);
+    this.state.cancelledRuns.delete(this.runKey(sessionKey, runId));
+    if (!runs || runs.size === 0) {
       this.state.inFlightBindings.delete(sessionKey);
+      if (!this.state.bindings.has(sessionKey) && !this.state.activeRuns.has(sessionKey)) {
+        this.state.generations.delete(sessionKey);
+      }
     }
   }
 
-  async bind(rawSessionKey: string, contextRef: string): Promise<ActiveBinding> {
+  async bind(rawSessionKey: string, contextRef: string, runId: string): Promise<ActiveBinding> {
     this.sweepExpired();
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
-    if (!sessionKey) {
-      throw new Error("CONTEXT_SESSION_INVALID");
+    if (!sessionKey || !runId) {
+      throw new Error("CONTEXT_TURN_INVALID");
     }
     const generation = this.bump(sessionKey);
-    this.beginBind(sessionKey);
+    this.beginBind(sessionKey, runId);
     try {
-      const binding = await this.client.consume(contextRef, rawSessionKey);
+      const binding = await this.client.consume(contextRef, rawSessionKey, runId);
+      if (this.state.cancelledRuns.has(this.runKey(sessionKey, runId))) {
+        throw new Error("CONTEXT_STALE_BIND");
+      }
       if (this.state.generations.get(sessionKey) !== generation) {
         throw new Error("CONTEXT_STALE_BIND");
       }
@@ -155,30 +176,57 @@ export class SurfaceContextRuntime {
       const active = { ...binding, expiresAtMs };
       // 新页面 Ref 先撤销当前 run 的旧对象；旧工具调用随后只能得到 unavailable。
       this.state.activeRuns.delete(sessionKey);
-      this.state.bindings.set(sessionKey, active);
+      this.clearToolAuthorizations(sessionKey);
+      this.state.bindings.set(sessionKey, { ...active, runId });
       return active;
     } finally {
-      this.endBind(sessionKey);
+      this.endBind(sessionKey, runId);
     }
   }
 
-  clear(rawSessionKey: string): boolean {
+  clear(rawSessionKey: string, expectedRunId?: string): boolean {
     this.sweepExpired();
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
-    this.bump(sessionKey);
-    const pending = this.state.bindings.delete(sessionKey);
-    const active = this.state.activeRuns.delete(sessionKey);
+    const pendingBinding = this.state.bindings.get(sessionKey);
+    const activeBinding = this.state.activeRuns.get(sessionKey);
+    const matchingInFlight = expectedRunId
+      ? this.state.inFlightBindings.get(sessionKey)?.has(expectedRunId) === true
+      : false;
+    if (
+      expectedRunId &&
+      pendingBinding?.runId !== expectedRunId &&
+      activeBinding?.runId !== expectedRunId &&
+      !matchingInFlight
+    ) {
+      return false;
+    }
+    if (expectedRunId) {
+      if (matchingInFlight) {
+        this.state.cancelledRuns.add(this.runKey(sessionKey, expectedRunId));
+      }
+    } else {
+      this.bump(sessionKey);
+    }
+    const pending =
+      !expectedRunId || pendingBinding?.runId === expectedRunId
+        ? this.state.bindings.delete(sessionKey)
+        : false;
+    const active =
+      !expectedRunId || activeBinding?.runId === expectedRunId
+        ? this.state.activeRuns.delete(sessionKey)
+        : false;
+    this.clearToolAuthorizations(sessionKey, expectedRunId);
     return pending || active;
   }
 
-  active(rawSessionKey: string | undefined): ActiveBinding | undefined {
+  active(rawSessionKey: string | undefined, runId: string | undefined): ActiveBinding | undefined {
     this.sweepExpired();
-    if (!rawSessionKey) {
+    if (!rawSessionKey || !runId) {
       return undefined;
     }
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
     const binding = this.state.activeRuns.get(sessionKey);
-    if (!binding) {
+    if (!binding || binding.runId !== runId) {
       return undefined;
     }
     if (binding.expiresAtMs <= this.now()) {
@@ -201,16 +249,58 @@ export class SurfaceContextRuntime {
     if (current?.runId === runId) {
       return current;
     }
-    if (current) {
-      this.state.activeRuns.delete(sessionKey);
-    }
     const pending = this.state.bindings.get(sessionKey);
-    if (!pending) {
+    if (!pending || pending.runId !== runId) {
       return undefined;
     }
     this.state.bindings.delete(sessionKey);
-    this.state.activeRuns.set(sessionKey, { ...pending, runId });
+    this.state.activeRuns.set(sessionKey, pending);
     return pending;
+  }
+
+  authorizeTool(
+    rawSessionKey: string | undefined,
+    runId: string | undefined,
+    toolCallId: string | undefined,
+  ): boolean {
+    if (!rawSessionKey || !runId || !toolCallId) {
+      return false;
+    }
+    const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    const binding = this.active(sessionKey, runId);
+    if (!binding) {
+      return false;
+    }
+    this.state.toolAuthorizations.set(toolCallId, { ...binding, sessionKey, runId });
+    return true;
+  }
+
+  consumeToolAuthorization(
+    rawSessionKey: string | undefined,
+    toolCallId: string | undefined,
+  ): ActiveBinding | undefined {
+    this.sweepExpired();
+    if (!rawSessionKey || !toolCallId) {
+      return undefined;
+    }
+    const authorization = this.state.toolAuthorizations.get(toolCallId);
+    this.state.toolAuthorizations.delete(toolCallId);
+    const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    return authorization?.sessionKey === sessionKey ? authorization : undefined;
+  }
+
+  clearToolCall(toolCallId: string | undefined): void {
+    if (toolCallId) {
+      this.state.toolAuthorizations.delete(toolCallId);
+    }
+  }
+
+  private clearToolAuthorizations(sessionKey: string, runId?: string): void {
+    for (const [toolCallId, authorization] of this.state.toolAuthorizations) {
+      if (authorization.sessionKey === sessionKey && (!runId || authorization.runId === runId)) {
+        this.state.toolAuthorizations.delete(toolCallId);
+      }
+    }
   }
 
   endRun(rawSessionKey: string | undefined, runId: string | undefined): void {
@@ -221,7 +311,8 @@ export class SurfaceContextRuntime {
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
     if (this.state.activeRuns.get(sessionKey)?.runId === runId) {
       this.state.activeRuns.delete(sessionKey);
-      if (!this.state.bindings.has(sessionKey)) {
+      this.clearToolAuthorizations(sessionKey, runId);
+      if (!this.state.bindings.has(sessionKey) && !this.state.inFlightBindings.has(sessionKey)) {
         this.state.generations.delete(sessionKey);
       }
     }
@@ -248,8 +339,8 @@ export function createSurfaceContextTools(
       "Check whether this exact OpenClaw session has a live FlowOS Surface Context binding. Takes no ref or identity arguments.",
     executionMode: "sequential",
     parameters: emptyParameters,
-    async execute() {
-      const binding = runtime.active(requireSession(context));
+    async execute(toolCallId) {
+      const binding = runtime.consumeToolAuthorization(requireSession(context), toolCallId);
       if (!binding) {
         return jsonResult({ available: false, reason: "CONTEXT_UNAVAILABLE" });
       }
@@ -268,8 +359,8 @@ export function createSurfaceContextTools(
       "Read the permission-filtered minimal Space or Artifact brief bound to this exact session. Takes no ref, path, user, tenant, endpoint, or credential arguments.",
     executionMode: "sequential",
     parameters: emptyParameters,
-    async execute() {
-      const binding = runtime.active(requireSession(context));
+    async execute(toolCallId) {
+      const binding = runtime.consumeToolAuthorization(requireSession(context), toolCallId);
       if (!binding) {
         return jsonResult({ available: false, reason: "CONTEXT_UNAVAILABLE" });
       }
