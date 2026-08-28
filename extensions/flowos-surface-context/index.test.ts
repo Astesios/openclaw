@@ -403,6 +403,13 @@ describe("session-bound runtime", () => {
 });
 
 describe("plugin registration", () => {
+  it("keeps the manifest tool contract aligned with runtime registration", () => {
+    const manifest = JSON.parse(
+      fs.readFileSync(new URL("./openclaw.plugin.json", import.meta.url), "utf8"),
+    ) as { contracts?: { tools?: string[] } };
+    expect(manifest.contracts?.tools).toEqual(["surface_context_resolve"]);
+  });
+
   it("rejects startup without the required private runtime config", () => {
     delete process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE;
     expect(() => setupPlugin()).toThrow("private runtime config is required");
