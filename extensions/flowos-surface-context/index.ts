@@ -48,40 +48,15 @@ export default definePluginEntry({
   register(api) {
     const endpoint = resolveTrustedAssistEndpoint(process.env.ASSIST_API_BASE);
     const token = consumeRuntimeToken();
-    const surfaceClient = endpoint && token ? new SurfaceContextClient(endpoint, token) : null;
-    const runtime = surfaceClient
-      ? new SurfaceContextRuntime(
-          surfaceClient,
-          api.config,
-          Date.now,
-          sharedSurfaceContextRuntimeState(),
-        )
-      : null;
-
-    api.registerGatewayMethod(
-      "flowos.surfaceContext.status",
-      async ({ params, client, respond }) => {
-        if (!trustedOperator(client)) {
-          reject(respond, "INVALID_REQUEST", "paired operator device authentication required");
-          return;
-        }
-        if (Object.keys(params ?? {}).length > 0) {
-          reject(respond, "INVALID_REQUEST", "this method accepts no arguments");
-          return;
-        }
-        if (!surfaceClient) {
-          respond(true, { state: token ? "UNAVAILABLE" : "DISABLED" });
-          return;
-        }
-        try {
-          respond(true, { state: await surfaceClient.status() });
-        } catch (error) {
-          const code = error instanceof SurfaceContextClientError ? error.code : "UNAVAILABLE";
-          api.logger.warn(`FlowOS Surface Context status unavailable code=${code}`);
-          respond(true, { state: "UNAVAILABLE" });
-        }
-      },
-      { scope: "operator.read" },
+    if (!endpoint || !token) {
+      throw new Error("FlowOS Surface Context private runtime config is required");
+    }
+    const surfaceClient = new SurfaceContextClient(endpoint, token);
+    const runtime = new SurfaceContextRuntime(
+      surfaceClient,
+      api.config,
+      Date.now,
+      sharedSurfaceContextRuntimeState(),
     );
 
     api.registerGatewayMethod(
@@ -106,11 +81,6 @@ export default definePluginEntry({
             "INVALID_REQUEST",
             "valid ContextRef, sessionKey and turnId are required",
           );
-          return;
-        }
-        if (!runtime) {
-          api.logger.warn("FlowOS Surface Context bind rejected: runtime unavailable");
-          reject(respond, "UNAVAILABLE", "Surface Context runtime is not configured");
           return;
         }
         try {
@@ -165,27 +135,27 @@ export default definePluginEntry({
         }
         const canonical = canonicalSessionKey(api.config, sessionKey);
         respond(true, {
-          cleared: runtime?.clear(sessionKey, turnId || undefined) ?? false,
+          cleared: runtime.clear(sessionKey, turnId || undefined),
           sessionKey: canonical,
         });
       },
       { scope: "operator.write" },
     );
 
-    api.registerTool((context) => (runtime ? createSurfaceContextTools(runtime, context) : null), {
-      names: ["surface_context_status", "surface_context_resolve"],
+    api.registerTool((context) => createSurfaceContextTools(runtime, context), {
+      names: ["surface_context_resolve"],
     });
 
     api.on("before_prompt_build", async (_event, context) => {
-      const binding = runtime?.claimForRun(context.sessionKey, context.runId);
+      const binding = runtime.claimForRun(context.sessionKey, context.runId);
       const prependContext = buildPromptContext(binding);
       return prependContext ? { prependContext } : undefined;
     });
 
     api.on("before_agent_run", async (_event, context) => {
-      const state = runtime?.requiredRunState(context.sessionKey, context.runId) ?? "NOT_REQUIRED";
+      const state = runtime.requiredRunState(context.sessionKey, context.runId);
       if (state === "NOT_REQUIRED") {
-        return;
+        return undefined;
       }
       if (state === "READY") {
         return { outcome: "pass" };
@@ -199,13 +169,10 @@ export default definePluginEntry({
     });
 
     api.on("before_tool_call", async (event, context) => {
-      if (
-        event.toolName !== "surface_context_status" &&
-        event.toolName !== "surface_context_resolve"
-      ) {
-        return;
+      if (event.toolName !== "surface_context_resolve") {
+        return undefined;
       }
-      const authorized = runtime?.authorizeTool(
+      const authorized = runtime.authorizeTool(
         context.sessionKey,
         event.runId ?? context.runId,
         event.toolCallId,
@@ -213,27 +180,17 @@ export default definePluginEntry({
       if (!authorized) {
         return { block: true, blockReason: "CONTEXT_UNAVAILABLE" };
       }
+      return undefined;
     });
 
     api.on("after_tool_call", async (event) => {
-      if (
-        event.toolName === "surface_context_status" ||
-        event.toolName === "surface_context_resolve"
-      ) {
-        runtime?.clearToolCall(event.toolCallId);
+      if (event.toolName === "surface_context_resolve") {
+        runtime.clearToolCall(event.toolCallId);
       }
     });
 
     api.on("agent_end", async (event, context) => {
-      runtime?.endRun(context.sessionKey, event.runId ?? context.runId);
-    });
-
-    api.on("gateway_start", async () => {
-      if (!runtime) {
-        api.logger.warn(
-          "FlowOS Surface Context is disabled because private runtime config is missing",
-        );
-      }
+      runtime.endRun(context.sessionKey, event.runId ?? context.runId);
     });
   },
 });

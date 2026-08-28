@@ -28,8 +28,6 @@ export type SurfaceContextBinding = {
   context: SurfaceContextBrief;
 };
 
-export type SurfaceContextAvailability = "DISABLED" | "ENABLED";
-
 export class SurfaceContextClientError extends Error {
   constructor(
     readonly code: string,
@@ -197,73 +195,6 @@ export class SurfaceContextClient {
     private readonly token: string,
   ) {}
 
-  async status(): Promise<SurfaceContextAvailability> {
-    return await new Promise((resolve, rejectRequest) => {
-      const request = httpRequest(
-        {
-          protocol: this.endpoint.protocol,
-          hostname: this.endpoint.hostname,
-          port: this.endpoint.port,
-          method: "GET",
-          path: "/api/surface-context/status",
-          headers: {
-            authorization: `Bearer ${this.token}`,
-            accept: "application/json",
-          },
-          timeout: 5_000,
-        },
-        (response) => {
-          const chunks: Buffer[] = [];
-          let size = 0;
-          response.on("data", (chunk: Buffer | string) => {
-            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            size += bytes.length;
-            if (size > maxResponseBytes) {
-              request.destroy(new Error("Assist response exceeds 16384 bytes"));
-              return;
-            }
-            chunks.push(bytes);
-          });
-          response.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
-            const status = response.statusCode ?? 0;
-            if (status < 200 || status >= 300) {
-              rejectRequest(
-                new SurfaceContextClientError(
-                  safeErrorCode(text),
-                  `Assist returned HTTP ${status}`,
-                ),
-              );
-              return;
-            }
-            try {
-              const parsed = JSON.parse(text) as unknown;
-              if (
-                !parsed ||
-                typeof parsed !== "object" ||
-                Array.isArray(parsed) ||
-                !exactKeys(parsed as Record<string, unknown>, ["state"]) ||
-                ((parsed as { state?: unknown }).state !== "DISABLED" &&
-                  (parsed as { state?: unknown }).state !== "ENABLED")
-              ) {
-                throw new SurfaceContextClientError(
-                  "CONTEXT_RESPONSE_INVALID",
-                  "invalid status response",
-                );
-              }
-              resolve((parsed as { state: SurfaceContextAvailability }).state);
-            } catch (error) {
-              rejectRequest(error);
-            }
-          });
-        },
-      );
-      request.on("timeout", () => request.destroy(new Error("Assist request timed out")));
-      request.on("error", rejectRequest);
-      request.end();
-    });
-  }
-
   async consume(
     contextRef: string,
     sessionKey: string,
@@ -309,7 +240,7 @@ export class SurfaceContextClient {
             try {
               resolve(parseBinding(JSON.parse(text) as unknown));
             } catch (error) {
-              rejectRequest(error);
+              rejectRequest(error instanceof Error ? error : new Error("invalid Assist response"));
             }
           });
         },
