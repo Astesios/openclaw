@@ -5,7 +5,7 @@
     "onConfigPaths": ["plugins.entries.flowos-surface-context"]
   },
   "contracts": {
-    "tools": ["surface_context_status", "surface_context_resolve"]
+    "tools": ["surface_context_resolve"]
   },
   "configSchema": {
     "type": "object",

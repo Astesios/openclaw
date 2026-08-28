@@ -365,26 +365,6 @@ export function createSurfaceContextTools(
   context: OpenClawPluginToolContext,
 ): AnyAgentTool[] {
   const emptyParameters = Type.Object({}, { additionalProperties: false });
-  const status: AnyAgentTool = {
-    name: "surface_context_status",
-    label: "Surface Context Status",
-    description:
-      "Check whether this exact OpenClaw session has a live FlowOS Surface Context binding. Takes no ref or identity arguments.",
-    executionMode: "sequential",
-    parameters: emptyParameters,
-    async execute(toolCallId) {
-      const binding = runtime.consumeToolAuthorization(requireSession(context), toolCallId);
-      if (!binding) {
-        return jsonResult({ available: false, reason: "CONTEXT_UNAVAILABLE" });
-      }
-      return jsonResult({
-        available: true,
-        providerId: binding.context.providerId,
-        objectType: binding.context.objectType,
-        expiresAt: binding.expiresAt,
-      });
-    },
-  };
   const resolve: AnyAgentTool = {
     name: "surface_context_resolve",
     label: "Surface Context Resolve",
@@ -403,7 +383,7 @@ export function createSurfaceContextTools(
       });
     },
   };
-  return [status, resolve];
+  return [resolve];
 }
 
 export function buildPromptContext(binding: ActiveBinding | undefined): string | undefined {
@@ -414,7 +394,7 @@ export function buildPromptContext(binding: ActiveBinding | undefined): string |
     "<flowos_surface_context>",
     "当前 OpenClaw session 已绑定一份由 FlowOS 验证的短时手机 Surface Context。",
     `对象类型：${binding.context.objectType}；Provider：${binding.context.providerId}。`,
-    "如需理解当前对象，调用 surface_context_status 与 surface_context_resolve。",
+    "如需理解当前对象，调用 surface_context_resolve。",
     "不要向用户索要 ContextRef、userId、tenantId、文件路径或凭据。",
     "</flowos_surface_context>",
   ].join("\n");

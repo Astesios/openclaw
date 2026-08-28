@@ -1,13 +1,10 @@
-import { lstatSync, readFileSync, unlinkSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { isAbsolute } from "node:path";
 
 const defaultAssistEndpoint = "http://127.0.0.1:18790";
 const allowedAssistHosts = new Set(["127.0.0.1", "localhost", "assist"]);
 const maxResponseBytes = 16 * 1024;
-const secretStateSymbol = Symbol.for("openclaw.flowosSurfaceContextRuntimeSecret");
-
-type RuntimeSecretState = { token?: string };
+const runtimeTokenPurpose = "flowos-surface-context-runtime-v1";
 
 export type SurfaceContextBrief = {
   schemaVersion: 1;
@@ -28,8 +25,6 @@ export type SurfaceContextBinding = {
   context: SurfaceContextBrief;
 };
 
-export type SurfaceContextAvailability = "DISABLED" | "ENABLED";
-
 export class SurfaceContextClientError extends Error {
   constructor(
     readonly code: string,
@@ -40,53 +35,12 @@ export class SurfaceContextClientError extends Error {
   }
 }
 
-function runtimeSecretState(): RuntimeSecretState {
-  const root = globalThis as typeof globalThis & {
-    [secretStateSymbol]?: RuntimeSecretState;
-  };
-  return (root[secretStateSymbol] ??= {});
-}
-
-export function clearRuntimeSecretForTest(): void {
-  delete runtimeSecretState().token;
-}
-
 export function consumeRuntimeToken(env: NodeJS.ProcessEnv = process.env): string | null {
-  const state = runtimeSecretState();
-  if (state.token) {
-    return state.token;
-  }
-  // 私有 Runtime token 不允许留在 OpenClaw / Agent 子进程环境中。
-  if (env.SURFACE_CONTEXT_RUNTIME_TOKEN?.trim()) {
+  const master = env.FLOWOS_TASK_CENTER_JWT_SECRET?.trim() ?? "";
+  if (Buffer.byteLength(master, "utf8") < 32) {
     return null;
   }
-  const filePath = env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE?.trim() ?? "";
-  if (!filePath || !isAbsolute(filePath)) {
-    return null;
-  }
-  try {
-    const stat = lstatSync(filePath);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size < 32 || stat.size > 4096) {
-      return null;
-    }
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-      return null;
-    }
-    const token = readFileSync(filePath, "utf8").trim();
-    if (token.length < 32 || token.length > 512) {
-      return null;
-    }
-    state.token = token;
-    return token;
-  } catch {
-    return null;
-  } finally {
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // 同进程重复 registry 可能已消费 one-shot 文件。
-    }
-  }
+  return createHmac("sha256", master).update(runtimeTokenPurpose).digest("hex");
 }
 
 export function resolveTrustedAssistEndpoint(value: unknown): URL | null {
@@ -197,73 +151,6 @@ export class SurfaceContextClient {
     private readonly token: string,
   ) {}
 
-  async status(): Promise<SurfaceContextAvailability> {
-    return await new Promise((resolve, rejectRequest) => {
-      const request = httpRequest(
-        {
-          protocol: this.endpoint.protocol,
-          hostname: this.endpoint.hostname,
-          port: this.endpoint.port,
-          method: "GET",
-          path: "/api/surface-context/status",
-          headers: {
-            authorization: `Bearer ${this.token}`,
-            accept: "application/json",
-          },
-          timeout: 5_000,
-        },
-        (response) => {
-          const chunks: Buffer[] = [];
-          let size = 0;
-          response.on("data", (chunk: Buffer | string) => {
-            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            size += bytes.length;
-            if (size > maxResponseBytes) {
-              request.destroy(new Error("Assist response exceeds 16384 bytes"));
-              return;
-            }
-            chunks.push(bytes);
-          });
-          response.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf8");
-            const status = response.statusCode ?? 0;
-            if (status < 200 || status >= 300) {
-              rejectRequest(
-                new SurfaceContextClientError(
-                  safeErrorCode(text),
-                  `Assist returned HTTP ${status}`,
-                ),
-              );
-              return;
-            }
-            try {
-              const parsed = JSON.parse(text) as unknown;
-              if (
-                !parsed ||
-                typeof parsed !== "object" ||
-                Array.isArray(parsed) ||
-                !exactKeys(parsed as Record<string, unknown>, ["state"]) ||
-                ((parsed as { state?: unknown }).state !== "DISABLED" &&
-                  (parsed as { state?: unknown }).state !== "ENABLED")
-              ) {
-                throw new SurfaceContextClientError(
-                  "CONTEXT_RESPONSE_INVALID",
-                  "invalid status response",
-                );
-              }
-              resolve((parsed as { state: SurfaceContextAvailability }).state);
-            } catch (error) {
-              rejectRequest(error);
-            }
-          });
-        },
-      );
-      request.on("timeout", () => request.destroy(new Error("Assist request timed out")));
-      request.on("error", rejectRequest);
-      request.end();
-    });
-  }
-
   async consume(
     contextRef: string,
     sessionKey: string,
@@ -309,7 +196,7 @@ export class SurfaceContextClient {
             try {
               resolve(parseBinding(JSON.parse(text) as unknown));
             } catch (error) {
-              rejectRequest(error);
+              rejectRequest(error instanceof Error ? error : new Error("invalid Assist response"));
             }
           });
         },
