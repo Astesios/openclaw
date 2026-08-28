@@ -1,13 +1,10 @@
-import { lstatSync, readFileSync, unlinkSync } from "node:fs";
+import { createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { isAbsolute } from "node:path";
 
 const defaultAssistEndpoint = "http://127.0.0.1:18790";
 const allowedAssistHosts = new Set(["127.0.0.1", "localhost", "assist"]);
 const maxResponseBytes = 16 * 1024;
-const secretStateSymbol = Symbol.for("openclaw.flowosSurfaceContextRuntimeSecret");
-
-type RuntimeSecretState = { token?: string };
+const runtimeTokenPurpose = "flowos-surface-context-runtime-v1";
 
 export type SurfaceContextBrief = {
   schemaVersion: 1;
@@ -38,53 +35,12 @@ export class SurfaceContextClientError extends Error {
   }
 }
 
-function runtimeSecretState(): RuntimeSecretState {
-  const root = globalThis as typeof globalThis & {
-    [secretStateSymbol]?: RuntimeSecretState;
-  };
-  return (root[secretStateSymbol] ??= {});
-}
-
-export function clearRuntimeSecretForTest(): void {
-  delete runtimeSecretState().token;
-}
-
 export function consumeRuntimeToken(env: NodeJS.ProcessEnv = process.env): string | null {
-  const state = runtimeSecretState();
-  if (state.token) {
-    return state.token;
-  }
-  // 私有 Runtime token 不允许留在 OpenClaw / Agent 子进程环境中。
-  if (env.SURFACE_CONTEXT_RUNTIME_TOKEN?.trim()) {
+  const master = env.FLOWOS_TASK_CENTER_JWT_SECRET?.trim() ?? "";
+  if (Buffer.byteLength(master, "utf8") < 32) {
     return null;
   }
-  const filePath = env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE?.trim() ?? "";
-  if (!filePath || !isAbsolute(filePath)) {
-    return null;
-  }
-  try {
-    const stat = lstatSync(filePath);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || stat.size < 32 || stat.size > 4096) {
-      return null;
-    }
-    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-      return null;
-    }
-    const token = readFileSync(filePath, "utf8").trim();
-    if (token.length < 32 || token.length > 512) {
-      return null;
-    }
-    state.token = token;
-    return token;
-  } catch {
-    return null;
-  } finally {
-    try {
-      unlinkSync(filePath);
-    } catch {
-      // 同进程重复 registry 可能已消费 one-shot 文件。
-    }
-  }
+  return createHmac("sha256", master).update(runtimeTokenPurpose).digest("hex");
 }
 
 export function resolveTrustedAssistEndpoint(value: unknown): URL | null {

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import {
-  clearRuntimeSecretForTest,
   consumeRuntimeToken,
   resolveTrustedAssistEndpoint,
   SurfaceContextClient,
@@ -16,7 +15,7 @@ import {
   SurfaceContextRuntime,
 } from "./src/runtime.js";
 
-export { clearRuntimeSecretForTest, consumeRuntimeToken, resolveTrustedAssistEndpoint };
+export { consumeRuntimeToken, resolveTrustedAssistEndpoint };
 export { buildPromptContext, canonicalSessionKey, SurfaceContextRuntime };
 
 function normalizedString(value: unknown, maxLength: number): string {
@@ -49,7 +48,7 @@ export default definePluginEntry({
     const endpoint = resolveTrustedAssistEndpoint(process.env.ASSIST_API_BASE);
     const token = consumeRuntimeToken();
     if (!endpoint || !token) {
-      throw new Error("FlowOS Surface Context private runtime config is required");
+      throw new Error("FlowOS standard tenant identity config is required");
     }
     const surfaceClient = new SurfaceContextClient(endpoint, token);
     const runtime = new SurfaceContextRuntime(

@@ -1,13 +1,10 @@
 import fs from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import os from "node:os";
-import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin, {
   buildPromptContext,
   canonicalSessionKey,
-  clearRuntimeSecretForTest,
   consumeRuntimeToken,
   resolveTrustedAssistEndpoint,
   SurfaceContextRuntime,
@@ -21,25 +18,11 @@ import { createSurfaceContextTools } from "./src/runtime.js";
 import { createSurfaceContextRuntimeState } from "./src/runtime.js";
 
 const originalEnv = { ...process.env };
-const tempDirs: string[] = [];
 
 afterEach(() => {
   process.env = { ...originalEnv };
-  clearRuntimeSecretForTest();
-  for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
   vi.restoreAllMocks();
 });
-
-function tokenFile(token = "r".repeat(48), mode = 0o600): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "flowos-surface-context-"));
-  tempDirs.push(dir);
-  const file = path.join(dir, "runtime-token");
-  fs.writeFileSync(file, token, { mode });
-  fs.chmodSync(file, mode);
-  return file;
-}
 
 function binding(overrides: Partial<SurfaceContextBinding> = {}): SurfaceContextBinding {
   return {
@@ -82,7 +65,7 @@ function setupPlugin() {
   return { registerGatewayMethod, registerTool, on };
 }
 
-describe("Surface Context private runtime config", () => {
+describe("Surface Context standard runtime identity", () => {
   it("accepts only the bounded local Assist topology", () => {
     expect(resolveTrustedAssistEndpoint(undefined)?.origin).toBe("http://127.0.0.1:18790");
     expect(resolveTrustedAssistEndpoint("http://assist:18790")?.origin).toBe("http://assist:18790");
@@ -98,18 +81,10 @@ describe("Surface Context private runtime config", () => {
     }
   });
 
-  it("consumes a private one-shot token file and rejects env retention", () => {
-    const file = tokenFile();
-    const env = { FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE: file };
-    expect(consumeRuntimeToken(env)).toBe("r".repeat(48));
-    expect(fs.existsSync(file)).toBe(false);
-    clearRuntimeSecretForTest();
-    expect(
-      consumeRuntimeToken({
-        SURFACE_CONTEXT_RUNTIME_TOKEN: "r".repeat(48),
-        FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE: tokenFile(),
-      }),
-    ).toBeNull();
+  it("derives a purpose-bound token from the standard tenant identity secret", () => {
+    const token = consumeRuntimeToken({ FLOWOS_TASK_CENTER_JWT_SECRET: "m".repeat(64) });
+    expect(token).toBe("483f5c7b38d750cf70960826ff6c61905d27d10a9c10f9fc8fd2489e425d77d3");
+    expect(consumeRuntimeToken({ FLOWOS_TASK_CENTER_JWT_SECRET: "short" })).toBeNull();
   });
 });
 
@@ -410,13 +385,13 @@ describe("plugin registration", () => {
     expect(manifest.contracts?.tools).toEqual(["surface_context_resolve"]);
   });
 
-  it("rejects startup without the required private runtime config", () => {
-    delete process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE;
-    expect(() => setupPlugin()).toThrow("private runtime config is required");
+  it("rejects registration without the standard tenant identity secret", () => {
+    delete process.env.FLOWOS_TASK_CENTER_JWT_SECRET;
+    expect(() => setupPlugin()).toThrow("standard tenant identity config is required");
   });
 
   it("registers paired-operator bind/clear, session tools and required-run gates", async () => {
-    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
     const { registerGatewayMethod, registerTool, on } = setupPlugin();
     expect(registerGatewayMethod.mock.calls.map((call) => [call[0], call[2]])).toEqual([
       ["flowos.surfaceContext.bind", { scope: "operator.write" }],
@@ -437,7 +412,7 @@ describe("plugin registration", () => {
   });
 
   it("lets only the bound chat run claim prompt and tool access", async () => {
-    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
     vi.spyOn(SurfaceContextClient.prototype, "consume").mockResolvedValue(binding());
     const { registerGatewayMethod, registerTool, on } = setupPlugin();
     const bindHandler = registerGatewayMethod.mock.calls[0]?.[1];
@@ -498,7 +473,7 @@ describe("plugin registration", () => {
   });
 
   it("blocks only a required run whose binding disappeared before prompt claim", async () => {
-    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
     vi.spyOn(SurfaceContextClient.prototype, "consume").mockResolvedValue(binding());
     const { registerGatewayMethod, on } = setupPlugin();
     const bindHandler = registerGatewayMethod.mock.calls[0]?.[1];
