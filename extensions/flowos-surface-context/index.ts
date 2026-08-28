@@ -182,6 +182,22 @@ export default definePluginEntry({
       return prependContext ? { prependContext } : undefined;
     });
 
+    api.on("before_agent_run", async (_event, context) => {
+      const state = runtime?.requiredRunState(context.sessionKey, context.runId) ?? "NOT_REQUIRED";
+      if (state === "NOT_REQUIRED") {
+        return;
+      }
+      if (state === "READY") {
+        return { outcome: "pass" };
+      }
+      return {
+        outcome: "block",
+        reason: "CONTEXT_REQUIRED_UNAVAILABLE",
+        message: "当前项目上下文已失效，请回到任务空间重试",
+        category: "flowos_surface_context",
+      };
+    });
+
     api.on("before_tool_call", async (event, context) => {
       if (
         event.toolName !== "surface_context_status" &&
