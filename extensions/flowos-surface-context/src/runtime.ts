@@ -17,6 +17,7 @@ type ToolAuthorization = ActiveBinding & { sessionKey: string; runId: string };
 export type SurfaceContextRuntimeState = {
   bindings: Map<string, PendingBinding>;
   activeRuns: Map<string, ActiveBinding & { runId: string }>;
+  requiredRuns: Map<string, number>;
   generations: Map<string, number>;
   inFlightBindings: Map<string, Set<string>>;
   cancelledRuns: Set<string>;
@@ -27,6 +28,7 @@ export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
   return {
     bindings: new Map(),
     activeRuns: new Map(),
+    requiredRuns: new Map(),
     generations: new Map(),
     inFlightBindings: new Map(),
     cancelledRuns: new Set(),
@@ -113,6 +115,11 @@ export class SurfaceContextRuntime {
         this.state.toolAuthorizations.delete(key);
       }
     }
+    for (const [key, expiresAtMs] of this.state.requiredRuns) {
+      if (expiresAtMs <= now) {
+        this.state.requiredRuns.delete(key);
+      }
+    }
     for (const key of this.state.generations.keys()) {
       if (
         !this.state.bindings.has(key) &&
@@ -177,6 +184,7 @@ export class SurfaceContextRuntime {
       // 新页面 Ref 先撤销当前 run 的旧对象；旧工具调用随后只能得到 unavailable。
       this.state.activeRuns.delete(sessionKey);
       this.clearToolAuthorizations(sessionKey);
+      this.state.requiredRuns.set(this.runKey(sessionKey, runId), expiresAtMs);
       this.state.bindings.set(sessionKey, { ...active, runId });
       return active;
     } finally {
@@ -234,6 +242,21 @@ export class SurfaceContextRuntime {
       return undefined;
     }
     return binding;
+  }
+
+  requiredRunState(
+    rawSessionKey: string | undefined,
+    runId: string | undefined,
+  ): "NOT_REQUIRED" | "READY" | "MISSING" {
+    this.sweepExpired();
+    if (!rawSessionKey || !runId) {
+      return "NOT_REQUIRED";
+    }
+    const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    if (!this.state.requiredRuns.has(this.runKey(sessionKey, runId))) {
+      return "NOT_REQUIRED";
+    }
+    return this.active(sessionKey, runId) ? "READY" : "MISSING";
   }
 
   claimForRun(
@@ -309,6 +332,7 @@ export class SurfaceContextRuntime {
       return;
     }
     const sessionKey = canonicalSessionKey(this.config, rawSessionKey);
+    this.state.requiredRuns.delete(this.runKey(sessionKey, runId));
     if (this.state.activeRuns.get(sessionKey)?.runId === runId) {
       this.state.activeRuns.delete(sessionKey);
       this.clearToolAuthorizations(sessionKey, runId);

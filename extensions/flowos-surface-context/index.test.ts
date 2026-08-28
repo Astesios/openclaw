@@ -380,7 +380,7 @@ describe("session-bound runtime", () => {
 });
 
 describe("plugin registration", () => {
-  it("registers paired-operator bind/clear, session tools and a prompt hook", async () => {
+  it("registers paired-operator bind/clear, session tools and required-run gates", async () => {
     delete process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE;
     const { registerGatewayMethod, registerTool, on } = setupPlugin();
     expect(registerGatewayMethod.mock.calls.map((call) => [call[0], call[2]])).toEqual([
@@ -392,6 +392,7 @@ describe("plugin registration", () => {
       names: ["surface_context_status", "surface_context_resolve"],
     });
     expect(on.mock.calls.some((call) => call[0] === "before_prompt_build")).toBe(true);
+    expect(on.mock.calls.some((call) => call[0] === "before_agent_run")).toBe(true);
     expect(on.mock.calls.some((call) => call[0] === "before_tool_call")).toBe(true);
     expect(on.mock.calls.some((call) => call[0] === "after_tool_call")).toBe(true);
     expect(on.mock.calls.some((call) => call[0] === "agent_end")).toBe(true);
@@ -442,6 +443,14 @@ describe("plugin registration", () => {
       beforePrompt({}, { sessionKey: "agent:main:main", runId: "run-expected-01234567" }),
     ).resolves.toMatchObject({ prependContext: expect.stringContaining("flowos_surface_context") });
 
+    const beforeRun = on.mock.calls.find((call) => call[0] === "before_agent_run")?.[1];
+    await expect(
+      beforeRun({}, { sessionKey: "agent:main:main", runId: "run-sibling-0123456" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      beforeRun({}, { sessionKey: "agent:main:main", runId: "run-expected-01234567" }),
+    ).resolves.toEqual({ outcome: "pass" });
+
     const beforeTool = on.mock.calls.find((call) => call[0] === "before_tool_call")?.[1];
     await expect(
       beforeTool(
@@ -468,6 +477,45 @@ describe("plugin registration", () => {
     const tools = toolFactory({ sessionKey: "agent:main:main" });
     const resolved = await tools[1]?.execute("call-expected", {});
     expect(JSON.stringify(resolved)).toContain("sp_trip");
+  });
+
+  it("blocks only a required run whose binding disappeared before prompt claim", async () => {
+    process.env.FLOWOS_SURFACE_CONTEXT_RUNTIME_TOKEN_FILE = tokenFile();
+    vi.spyOn(SurfaceContextClient.prototype, "consume").mockResolvedValue(binding());
+    const { registerGatewayMethod, on } = setupPlugin();
+    const bindHandler = registerGatewayMethod.mock.calls[1]?.[1];
+    await bindHandler({
+      params: {
+        contextRef: "r".repeat(40),
+        sessionKey: "main",
+        turnId: "run-required-01234567",
+      },
+      client: pairedOperator(),
+      respond: vi.fn(),
+    });
+    const clearHandler = registerGatewayMethod.mock.calls[2]?.[1];
+    await clearHandler({
+      params: { sessionKey: "main", turnId: "run-required-01234567" },
+      client: pairedOperator(),
+      respond: vi.fn(),
+    });
+
+    const beforePrompt = on.mock.calls.find((call) => call[0] === "before_prompt_build")?.[1];
+    await expect(
+      beforePrompt({}, { sessionKey: "agent:main:main", runId: "run-required-01234567" }),
+    ).resolves.toBeUndefined();
+
+    const beforeRun = on.mock.calls.find((call) => call[0] === "before_agent_run")?.[1];
+    await expect(
+      beforeRun({}, { sessionKey: "agent:main:main", runId: "run-unrelated-012345" }),
+    ).resolves.toBeUndefined();
+    await expect(
+      beforeRun({}, { sessionKey: "agent:main:main", runId: "run-required-01234567" }),
+    ).resolves.toMatchObject({
+      outcome: "block",
+      reason: "CONTEXT_REQUIRED_UNAVAILABLE",
+      category: "flowos_surface_context",
+    });
   });
 });
 
