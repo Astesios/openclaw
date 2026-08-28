@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
 import {
   approveDevicePairing,
@@ -370,8 +370,11 @@ function loadPrivateSecretFile(path: string): string {
     return "";
   }
   try {
-    const stat = statSync(path);
+    const stat = lstatSync(path);
     if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (stat.mode & 0o400) === 0) {
+      return "";
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       return "";
     }
     return readFileSync(path, "utf8").trim();
@@ -394,9 +397,12 @@ function loadDeviceEventSecret(additionalCredentials: readonly unknown[]): strin
     return "";
   }
   try {
-    const stat = statSync(path);
+    const stat = lstatSync(path);
     // The signing key is a Gateway-only credential. Group/other access is always unsafe.
     if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (stat.mode & 0o400) === 0) {
+      return "";
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
       return "";
     }
     const secret = readFileSync(path, "utf8").trim();

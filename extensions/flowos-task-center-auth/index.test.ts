@@ -328,6 +328,25 @@ describe("flowos task-center auth", () => {
     });
   });
 
+  it("rejects a signing secret symlink", async () => {
+    const secret = writeTaskCenterSecret();
+    const target = process.env.FLOWOS_TASK_CENTER_JWT_SECRET_FILE!;
+    const link = path.join(path.dirname(target), "task-center-jwt.link");
+    fs.symlinkSync(target, link);
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET_FILE = link;
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.deviceOnboardingToken");
+    const respond = vi.fn();
+
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+
+    expect(secret).toHaveLength(32);
+    expect(respond).toHaveBeenCalledWith(false, undefined, {
+      code: "UNAVAILABLE",
+      message: "user auth is not configured",
+    });
+  });
+
   it("issues a dedicated Surface Context user token", async () => {
     process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "s".repeat(32);
     const { calls } = setup();
