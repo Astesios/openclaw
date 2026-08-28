@@ -68,6 +68,17 @@ function writeDeviceSecret(secret = "d".repeat(48), mode = 0o600): string {
   return secret;
 }
 
+function writeTaskCenterSecret(secret = "s".repeat(32), mode = 0o600): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "flowos-task-center-jwt-"));
+  tempDirs.push(dir);
+  const file = path.join(dir, "task-center-jwt.secret");
+  fs.writeFileSync(file, secret, { mode });
+  fs.chmodSync(file, mode);
+  delete process.env.FLOWOS_TASK_CENTER_JWT_SECRET;
+  process.env.FLOWOS_TASK_CENTER_JWT_SECRET_FILE = file;
+  return secret;
+}
+
 function setup(gatewayCredential?: string) {
   const records = new Map<string, StoredBinding>();
   const registerGatewayMethod = vi.fn();
@@ -285,6 +296,36 @@ describe("flowos task-center auth", () => {
       "miniapp.inbox.ack",
       "miniapp.function.invoke",
     ]);
+  });
+
+  it("loads the shared signing secret from a private file", async () => {
+    writeTaskCenterSecret();
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.deviceOnboardingToken");
+    const respond = vi.fn();
+
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+
+    expect(respond.mock.calls[0][0]).toBe(true);
+    expect(decodeClaims(respond.mock.calls[0][1].accessToken)).toMatchObject({
+      aud: "assist:device-onboarding",
+      sub: "user:alice",
+      tenantId: "tenant-a",
+    });
+  });
+
+  it("rejects a group-readable signing secret file", async () => {
+    writeTaskCenterSecret("s".repeat(32), 0o640);
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.deviceOnboardingToken");
+    const respond = vi.fn();
+
+    await invoke(handler, { params: {}, client: pairedOperator(), respond });
+
+    expect(respond).toHaveBeenCalledWith(false, undefined, {
+      code: "UNAVAILABLE",
+      message: "user auth is not configured",
+    });
   });
 
   it("issues a dedicated Surface Context user token", async () => {

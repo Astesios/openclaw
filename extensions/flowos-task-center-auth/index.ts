@@ -365,6 +365,29 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
+function loadPrivateSecretFile(path: string): string {
+  if (!path) {
+    return "";
+  }
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (stat.mode & 0o400) === 0) {
+      return "";
+    }
+    return readFileSync(path, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function loadTaskCenterJwtSecret(): string {
+  const inline = normalizedString(process.env.FLOWOS_TASK_CENTER_JWT_SECRET);
+  if (inline) {
+    return inline;
+  }
+  return loadPrivateSecretFile(normalizedString(process.env.FLOWOS_TASK_CENTER_JWT_SECRET_FILE));
+}
+
 function loadDeviceEventSecret(additionalCredentials: readonly unknown[]): string {
   const path = normalizedString(process.env.FLOWOS_DEVICE_EVENT_JWT_SECRET_FILE);
   if (!path) {
@@ -395,7 +418,7 @@ async function issueUserToken(
 ): Promise<{ accessToken: string; tokenType: "Bearer"; expiresIn: number }> {
   const userId = normalizedString(config.userId);
   const tenantId = normalizedString(config.tenantId);
-  const secret = normalizedString(process.env.FLOWOS_TASK_CENTER_JWT_SECRET);
+  const secret = loadTaskCenterJwtSecret();
   if (!userId || !tenantId || Buffer.byteLength(secret) < 32) {
     throw new Error("user auth is not configured");
   }
