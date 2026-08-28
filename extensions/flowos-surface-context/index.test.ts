@@ -330,6 +330,57 @@ describe("session-bound runtime", () => {
     expect(runtime.claimForRun("agent:main:main", "run-2")).toBeUndefined();
   });
 
+  it("keeps a required obligation after binding TTL until matching agent end", async () => {
+    let now = Date.now();
+    const runtime = new SurfaceContextRuntime(
+      {
+        consume: vi.fn(async () => binding({ expiresAt: new Date(now + 1_000).toISOString() })),
+      } as unknown as SurfaceContextClient,
+      { agents: { list: [{ id: "main", default: true }] } },
+      () => now,
+    );
+    await runtime.bind("main", "ref", "run-required");
+    expect(runtime.requiredRunState("agent:main:main", "run-required")).toBe("MISSING");
+    runtime.claimForRun("agent:main:main", "run-required");
+    expect(runtime.requiredRunState("agent:main:main", "run-required")).toBe("READY");
+
+    now += 1_001;
+    expect(runtime.claimForRun("agent:main:main", "run-required")).toBeUndefined();
+    expect(runtime.requiredRunState("agent:main:main", "run-required")).toBe("MISSING");
+
+    runtime.endRun("agent:main:main", "run-required");
+    expect(runtime.requiredRunState("agent:main:main", "run-required")).toBe("NOT_REQUIRED");
+  });
+
+  it("uses turn-scoped clear as explicit non-delivery cancellation", async () => {
+    const runtime = new SurfaceContextRuntime(
+      { consume: vi.fn(async () => binding()) } as unknown as SurfaceContextClient,
+      { agents: { list: [{ id: "main", default: true }] } },
+    );
+    await runtime.bind("main", "ref", "run-cancelled");
+    expect(runtime.clear("main", "run-cancelled")).toBe(true);
+    expect(runtime.requiredRunState("main", "run-cancelled")).toBe("NOT_REQUIRED");
+  });
+
+  it("rejects new required binds when the obligation capacity is full", async () => {
+    const state = createSurfaceContextRuntimeState();
+    for (let index = 0; index < 1024; index += 1) {
+      state.requiredRuns.add(`agent:main:session-${index}\u0000run-${index}`);
+    }
+    const consume = vi.fn(async () => binding());
+    const runtime = new SurfaceContextRuntime(
+      { consume } as unknown as SurfaceContextClient,
+      { agents: { list: [{ id: "main", default: true }] } },
+      Date.now,
+      state,
+    );
+
+    await expect(runtime.bind("main", "ref", "run-overflow")).rejects.toThrow(
+      "CONTEXT_REQUIRED_RUN_LIMIT_REACHED",
+    );
+    expect(consume).not.toHaveBeenCalled();
+  });
+
   it("keeps a newer in-flight bind generation when the old run ends", async () => {
     let finishSecond: ((value: SurfaceContextBinding) => void) | undefined;
     let consumeCount = 0;
@@ -495,7 +546,7 @@ describe("plugin registration", () => {
     });
     const clearHandler = registerGatewayMethod.mock.calls[2]?.[1];
     await clearHandler({
-      params: { sessionKey: "main", turnId: "run-required-01234567" },
+      params: { sessionKey: "main" },
       client: pairedOperator(),
       respond: vi.fn(),
     });

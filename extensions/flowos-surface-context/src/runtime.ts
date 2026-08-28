@@ -5,6 +5,7 @@ import type { SurfaceContextBinding, SurfaceContextBrief } from "./client.js";
 import { SurfaceContextClient } from "./client.js";
 
 const maxBindings = 1024;
+const maxRequiredRuns = 1024;
 const runtimeStateSymbol = Symbol.for("openclaw.flowosSurfaceContextRuntimeState");
 
 type ActiveBinding = SurfaceContextBinding & {
@@ -17,7 +18,7 @@ type ToolAuthorization = ActiveBinding & { sessionKey: string; runId: string };
 export type SurfaceContextRuntimeState = {
   bindings: Map<string, PendingBinding>;
   activeRuns: Map<string, ActiveBinding & { runId: string }>;
-  requiredRuns: Map<string, number>;
+  requiredRuns: Set<string>;
   generations: Map<string, number>;
   inFlightBindings: Map<string, Set<string>>;
   cancelledRuns: Set<string>;
@@ -28,7 +29,7 @@ export function createSurfaceContextRuntimeState(): SurfaceContextRuntimeState {
   return {
     bindings: new Map(),
     activeRuns: new Map(),
-    requiredRuns: new Map(),
+    requiredRuns: new Set(),
     generations: new Map(),
     inFlightBindings: new Map(),
     cancelledRuns: new Set(),
@@ -115,11 +116,6 @@ export class SurfaceContextRuntime {
         this.state.toolAuthorizations.delete(key);
       }
     }
-    for (const [key, expiresAtMs] of this.state.requiredRuns) {
-      if (expiresAtMs <= now) {
-        this.state.requiredRuns.delete(key);
-      }
-    }
     for (const key of this.state.generations.keys()) {
       if (
         !this.state.bindings.has(key) &&
@@ -159,6 +155,13 @@ export class SurfaceContextRuntime {
     if (!sessionKey || !runId) {
       throw new Error("CONTEXT_TURN_INVALID");
     }
+    const requiredRunKey = this.runKey(sessionKey, runId);
+    if (
+      !this.state.requiredRuns.has(requiredRunKey) &&
+      this.state.requiredRuns.size >= maxRequiredRuns
+    ) {
+      throw new Error("CONTEXT_REQUIRED_RUN_LIMIT_REACHED");
+    }
     const generation = this.bump(sessionKey);
     this.beginBind(sessionKey, runId);
     try {
@@ -184,7 +187,7 @@ export class SurfaceContextRuntime {
       // 新页面 Ref 先撤销当前 run 的旧对象；旧工具调用随后只能得到 unavailable。
       this.state.activeRuns.delete(sessionKey);
       this.clearToolAuthorizations(sessionKey);
-      this.state.requiredRuns.set(this.runKey(sessionKey, runId), expiresAtMs);
+      this.state.requiredRuns.add(requiredRunKey);
       this.state.bindings.set(sessionKey, { ...active, runId });
       return active;
     } finally {
@@ -200,11 +203,15 @@ export class SurfaceContextRuntime {
     const matchingInFlight = expectedRunId
       ? this.state.inFlightBindings.get(sessionKey)?.has(expectedRunId) === true
       : false;
+    const matchingRequired = expectedRunId
+      ? this.state.requiredRuns.has(this.runKey(sessionKey, expectedRunId))
+      : false;
     if (
       expectedRunId &&
       pendingBinding?.runId !== expectedRunId &&
       activeBinding?.runId !== expectedRunId &&
-      !matchingInFlight
+      !matchingInFlight &&
+      !matchingRequired
     ) {
       return false;
     }
@@ -212,6 +219,8 @@ export class SurfaceContextRuntime {
       if (matchingInFlight) {
         this.state.cancelledRuns.add(this.runKey(sessionKey, expectedRunId));
       }
+      // turn-scoped clear only comes from Android before chat delivery is accepted.
+      this.state.requiredRuns.delete(this.runKey(sessionKey, expectedRunId));
     } else {
       this.bump(sessionKey);
     }
@@ -224,7 +233,7 @@ export class SurfaceContextRuntime {
         ? this.state.activeRuns.delete(sessionKey)
         : false;
     this.clearToolAuthorizations(sessionKey, expectedRunId);
-    return pending || active;
+    return pending || active || matchingRequired;
   }
 
   active(rawSessionKey: string | undefined, runId: string | undefined): ActiveBinding | undefined {
