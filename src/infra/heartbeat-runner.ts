@@ -1342,32 +1342,6 @@ function selectSystemEventsConsumedByHeartbeat(params: {
   return preflight.pendingEventEntries;
 }
 
-function resolveRemainingSystemEventWake(events: readonly SystemEvent[]):
-  | {
-      source: "exec-event" | "cron" | "background-task";
-      intent: "event" | "immediate";
-      reason: string;
-      heartbeat?: { target: "last" };
-    }
-  | undefined {
-  if (events.some((event) => isExecCompletionEvent(event.text))) {
-    return { source: "exec-event", intent: "event", reason: "exec-event" };
-  }
-  const cronEvent = events.find((event) => event.contextKey?.startsWith("cron:"));
-  if (cronEvent?.contextKey) {
-    return {
-      source: "cron",
-      intent: "event",
-      reason: cronEvent.contextKey,
-      heartbeat: { target: "last" },
-    };
-  }
-  if (events.some(isBackgroundTaskPayloadEvent)) {
-    return { source: "background-task", intent: "immediate", reason: "background-task" };
-  }
-  return undefined;
-}
-
 export async function runHeartbeatOnce(opts: {
   cfg?: OpenClawConfig;
   agentId?: string;
@@ -1758,20 +1732,7 @@ export async function runHeartbeatOnce(opts: {
     if (!preflight.shouldInspectPendingEvents || inspectedSystemEventsToConsume.length === 0) {
       return;
     }
-    const consumed = consumeSelectedSystemEventEntries(sessionKey, inspectedSystemEventsToConsume);
-    if (consumed.length === 0) {
-      return;
-    }
-    const nextWake = resolveRemainingSystemEventWake(peekSystemEventEntries(sessionKey));
-    if (!nextWake) {
-      return;
-    }
-    requestHeartbeat({
-      ...nextWake,
-      agentId,
-      sessionKey,
-      coalesceMs: 0,
-    });
+    consumeSelectedSystemEventEntries(sessionKey, inspectedSystemEventsToConsume);
   };
 
   const ctx = {
@@ -1890,9 +1851,7 @@ export async function runHeartbeatOnce(opts: {
     const replyOpts = {
       isHeartbeat: true,
       [REPLY_OPERATION_RUN_STATE]: replyOperationRunState,
-      ...(inspectedSystemEventsToConsume.length > 0
-        ? { [HEARTBEAT_OWNS_SYSTEM_EVENTS]: true as const }
-        : {}),
+      ...(hasBackgroundTaskEvents ? { [HEARTBEAT_OWNS_SYSTEM_EVENTS]: true as const } : {}),
       ...(heartbeatModelOverride ? { heartbeatModelOverride } : {}),
       suppressToolErrorWarnings,
       ...(usesHeartbeatResponseTool ? { enableHeartbeatTool: true, forceHeartbeatTool: true } : {}),

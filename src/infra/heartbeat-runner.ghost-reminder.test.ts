@@ -10,23 +10,15 @@ import {
   setupTelegramHeartbeatPluginRuntimeForTests,
   withTempHeartbeatSandbox,
 } from "./heartbeat-runner.test-utils.js";
-import {
-  requestHeartbeat,
-  resetHeartbeatWakeStateForTests,
-  setHeartbeatWakeHandler,
-  type HeartbeatWakeRequest,
-} from "./heartbeat-wake.js";
 import { enqueueSystemEvent, peekSystemEvents, resetSystemEventsForTest } from "./system-events.js";
 
 beforeEach(() => {
   setupTelegramHeartbeatPluginRuntimeForTests();
   resetSystemEventsForTest();
-  resetHeartbeatWakeStateForTests();
 });
 
 afterEach(() => {
   resetSystemEventsForTest();
-  resetHeartbeatWakeStateForTests();
   vi.restoreAllMocks();
 });
 
@@ -374,36 +366,20 @@ describe("Ghost reminder bug (issue #13317)", () => {
 
   it.each([
     {
-      label: "FlowOS / background first",
+      label: "FlowOS",
       source: "background-task" as const,
       event: "[FlowOS Execution] child completed; validate and complete the Execution",
       contextKey: "flowos-execution:execution-1:attempt-1:ended",
-      backgroundFirst: true,
     },
     {
-      label: "FlowOS / background last",
-      source: "background-task" as const,
-      event: "[FlowOS Execution] child completed; validate and complete the Execution",
-      contextKey: "flowos-execution:execution-1:attempt-1:ended",
-      backgroundFirst: false,
-    },
-    {
-      label: "task registry / background first",
+      label: "task registry",
       source: "background-task-blocked" as const,
       event: "Background task task-1 is blocked and needs owner follow-up",
       contextKey: "task:task-1:blocked-followup",
-      backgroundFirst: true,
-    },
-    {
-      label: "task registry / background last",
-      source: "background-task-blocked" as const,
-      event: "Background task task-1 is blocked and needs owner follow-up",
-      contextKey: "task:task-1:blocked-followup",
-      backgroundFirst: false,
     },
   ])(
-    "$label coalescing schedules every remaining event owner",
-    async ({ source, event, contextKey, backgroundFirst }) => {
+    "$label wake leaves exec and cron entries for their dedicated handlers",
+    async ({ source, event, contextKey }) => {
       await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
         const cfg = createLastTargetConfig({ tmpDir, storePath });
         const sessionKey = await seedMainSessionStore(storePath, cfg, {
@@ -413,181 +389,50 @@ describe("Ghost reminder bug (issue #13317)", () => {
         });
         const execEvent = "Exec completed (mix-run, code 0) :: deploy succeeded";
         const cronEvent = "Cron: rotate the maintenance snapshot";
-        const enqueueBackground = () => enqueueSystemEvent(event, { sessionKey, contextKey });
-        const enqueueDedicated = () => {
-          enqueueSystemEvent(execEvent, { sessionKey, contextKey: "exec:mix-run" });
-          enqueueSystemEvent(cronEvent, { sessionKey, contextKey: "cron:maintenance" });
-        };
-        if (backgroundFirst) {
-          enqueueBackground();
-          enqueueDedicated();
-        } else {
-          enqueueDedicated();
-          enqueueBackground();
-        }
+        enqueueSystemEvent(event, { sessionKey, contextKey });
+        enqueueSystemEvent(execEvent, { sessionKey, contextKey: "exec:mix-run" });
+        enqueueSystemEvent(cronEvent, { sessionKey, contextKey: "cron:maintenance" });
 
         const sendTelegram = vi.fn().mockResolvedValue({
           messageId: "m1",
           chatId: "-100155462274",
         });
         replySpy.mockResolvedValue({ text: "Handled queued event" });
-        const dispatched: HeartbeatWakeRequest[] = [];
-        const dispose = setHeartbeatWakeHandler(async (wake) => {
-          dispatched.push(wake);
-          return await runHeartbeatOnce({
-            ...wake,
+        const run = async (
+          wakeSource: "background-task" | "background-task-blocked" | "exec-event" | "cron",
+        ) =>
+          await runHeartbeatOnce({
             cfg,
+            agentId: "main",
+            sessionKey,
+            source: wakeSource,
+            intent: "immediate",
+            reason: wakeSource === "cron" ? "cron:maintenance" : wakeSource,
             deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
           });
-        });
-        const backgroundWake: HeartbeatWakeRequest = {
-          source,
-          intent: "immediate",
-          reason: source,
-          agentId: "main",
-          sessionKey,
+
+        expect((await run(source)).status).toBe("ran");
+        const backgroundContext = mockCallAt(replySpy, 0, "background task wake")[0] as {
+          Body?: string;
         };
-        const dedicatedWakes: HeartbeatWakeRequest[] = [
-          {
-            source: "exec-event",
-            intent: "event",
-            reason: "exec-event",
-            agentId: "main",
-            sessionKey,
-          },
-          {
-            source: "cron",
-            intent: "event",
-            reason: "cron:maintenance",
-            agentId: "main",
-            sessionKey,
-            heartbeat: { target: "last" },
-          },
-        ];
+        expect(backgroundContext.Body).toContain(event);
+        expect(backgroundContext.Body).not.toContain(execEvent);
+        expect(backgroundContext.Body).not.toContain(cronEvent);
+        expect(peekSystemEvents(sessionKey)).toEqual([execEvent, cronEvent]);
 
-        try {
-          const requested = backgroundFirst
-            ? [backgroundWake, ...dedicatedWakes]
-            : [...dedicatedWakes, backgroundWake];
-          requested.forEach((wake) => requestHeartbeat({ ...wake, coalesceMs: 0 }));
-          await vi.waitFor(
-            () => {
-              expect(dispatched).toHaveLength(3);
-              expect(peekSystemEvents(sessionKey)).toEqual([]);
-            },
-            { timeout: 2_000 },
-          );
+        expect((await run("exec-event")).status).toBe("ran");
+        const execContext = mockCallAt(replySpy, 1, "exec wake")[0] as { Body?: string };
+        expect(execContext.Body).toContain(execEvent);
+        expect(execContext.Body).not.toContain(cronEvent);
+        expect(peekSystemEvents(sessionKey)).toEqual([cronEvent]);
 
-          expect(dispatched.map((wake) => wake.source)).toEqual([source, "exec-event", "cron"]);
-          const backgroundContext = mockCallAt(replySpy, 0, "background task wake")[0] as {
-            Body?: string;
-          };
-          const execContext = mockCallAt(replySpy, 1, "exec wake")[0] as { Body?: string };
-          const cronContext = mockCallAt(replySpy, 2, "cron wake")[0] as { Body?: string };
-          expect(backgroundContext.Body).toContain(event);
-          expect(backgroundContext.Body).not.toContain(execEvent);
-          expect(backgroundContext.Body).not.toContain(cronEvent);
-          expect(execContext.Body).toContain(execEvent);
-          expect(execContext.Body).not.toContain(event);
-          expect(execContext.Body).not.toContain(cronEvent);
-          expect(cronContext.Body).toContain(cronEvent);
-          expect(cronContext.Body).not.toContain(event);
-          expect(cronContext.Body).not.toContain(execEvent);
-          expect(peekSystemEvents(sessionKey)).toEqual([]);
-        } finally {
-          dispose();
-        }
+        expect((await run("cron")).status).toBe("ran");
+        const cronContext = mockCallAt(replySpy, 2, "cron wake")[0] as { Body?: string };
+        expect(cronContext.Body).toContain(cronEvent);
+        expect(peekSystemEvents(sessionKey)).toEqual([]);
       });
     },
   );
-
-  it("real wake coalescing retains all owner classes across an admission retry", async () => {
-    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
-      const cfg = createLastTargetConfig({ tmpDir, storePath });
-      const sessionKey = await seedMainSessionStore(storePath, cfg, {
-        lastChannel: "telegram",
-        lastProvider: "telegram",
-        lastTo: "-100155462274",
-      });
-      const backgroundEvent = "[FlowOS Execution] child completed; validate and complete it";
-      const execEvent = "Exec completed (busy-run, code 0) :: deploy succeeded";
-      const cronEvent = "Cron: rotate the maintenance snapshot";
-      enqueueSystemEvent(backgroundEvent, {
-        sessionKey,
-        contextKey: "flowos-execution:execution-1:attempt-1:ended",
-      });
-      enqueueSystemEvent(execEvent, { sessionKey, contextKey: "exec:busy-run" });
-      enqueueSystemEvent(cronEvent, { sessionKey, contextKey: "cron:maintenance" });
-
-      replySpy
-        .mockImplementationOnce(async (_ctx, options) => {
-          const state = resolveReplyOperationRunState(options);
-          if (state) {
-            state.admission = { status: "skipped", reason: "active-run" };
-          }
-          return undefined;
-        })
-        .mockResolvedValue({ text: "Handled queued event" });
-      const sendTelegram = vi.fn().mockResolvedValue({
-        messageId: "m1",
-        chatId: "-100155462274",
-      });
-      const dispatched: HeartbeatWakeRequest[] = [];
-      const dispose = setHeartbeatWakeHandler(async (wake) => {
-        dispatched.push(wake);
-        return await runHeartbeatOnce({
-          ...wake,
-          cfg,
-          deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
-        });
-      });
-
-      try {
-        requestHeartbeat({
-          source: "background-task",
-          intent: "immediate",
-          reason: "background-task",
-          agentId: "main",
-          sessionKey,
-          coalesceMs: 0,
-        });
-        requestHeartbeat({
-          source: "exec-event",
-          intent: "event",
-          reason: "exec-event",
-          agentId: "main",
-          sessionKey,
-          coalesceMs: 0,
-        });
-        requestHeartbeat({
-          source: "cron",
-          intent: "event",
-          reason: "cron:maintenance",
-          agentId: "main",
-          sessionKey,
-          coalesceMs: 0,
-        });
-        await vi.waitFor(
-          () => {
-            expect(dispatched).toHaveLength(4);
-            expect(peekSystemEvents(sessionKey)).toEqual([]);
-          },
-          { timeout: 3_000 },
-        );
-
-        expect(dispatched.map((wake) => wake.source)).toEqual([
-          "background-task",
-          "background-task",
-          "exec-event",
-          "cron",
-        ]);
-        expect(replySpy).toHaveBeenCalledTimes(4);
-        expect(peekSystemEvents(sessionKey)).toEqual([]);
-      } finally {
-        dispose();
-      }
-    });
-  });
 
   it("uses CRON_EVENT_PROMPT when an actionable cron event exists", async () => {
     const { result, sendTelegram, calledCtx } = await runCronReminderCase(
