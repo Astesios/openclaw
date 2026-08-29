@@ -104,6 +104,14 @@ export default definePluginEntry({
       deliverExecutionResultCard,
       api.logger,
       locks,
+      (plan) =>
+        validateSpaceArtifact({
+          runtime: api.runtime,
+          workspaceDir: plan.workspaceDir,
+          spaceId: plan.spaceId,
+          filePath: plan.artifactFilePath,
+          artifactType: plan.artifactType,
+        }),
     );
 
     api.registerTool(

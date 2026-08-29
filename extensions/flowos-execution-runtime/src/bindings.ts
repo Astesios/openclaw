@@ -23,6 +23,21 @@ export type ResultDelivery = {
   };
 };
 
+export type FinalizationPlan = {
+  workspaceDir: string;
+  spaceId: string;
+  artifactTitle: string;
+  artifactFilePath: string;
+  artifactType: "html" | "markdown";
+  cardCaption: string;
+};
+
+export type FinalizationFailure = {
+  errorCode: "VALIDATION_FAILED";
+  retryable: false;
+  outcome: "planned_validation_failed";
+};
+
 export type RunBinding = {
   executionId: string;
   attemptId: string;
@@ -34,6 +49,8 @@ export type RunBinding = {
   status: RunBindingStatus;
   outcome?: string;
   closureWakeCount?: number;
+  finalizationPlan?: FinalizationPlan;
+  finalizationFailure?: FinalizationFailure;
   resultDelivery?: ResultDelivery;
   createdAt: number;
   updatedAt: number;
@@ -84,6 +101,7 @@ export class RunBindingStore {
     targetAgentId: string;
     childSessionKey: string;
     runId: string;
+    finalizationPlan?: FinalizationPlan;
     now: number;
   }): Promise<{ binding: RunBinding; claimed: boolean }> {
     if (!this.store.update) {
@@ -105,6 +123,7 @@ export class RunBindingStore {
         targetAgentId: params.targetAgentId,
         childSessionKey: params.childSessionKey,
         runId: params.runId,
+        ...(params.finalizationPlan ? { finalizationPlan: params.finalizationPlan } : {}),
         status: "STARTING",
         updatedAt: params.now,
       };

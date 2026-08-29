@@ -1,7 +1,13 @@
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
-import { RunBindingStore, type ResultDelivery, type RunBinding } from "./bindings.js";
+import {
+  type FinalizationPlan,
+  RunBindingStore,
+  type ResultDelivery,
+  type RunBinding,
+} from "./bindings.js";
 import { FlowosExecutionClient, type ActiveExecution, type SpaceArtifactRef } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
+import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 // Agent lifecycle hooks can fire before automatic retries, so durable bindings
@@ -26,6 +32,8 @@ type ResultCardDelivery = (params: {
   artifactFilePath: string;
   caption: string;
 }) => Promise<void>;
+
+type PlannedArtifactValidator = (plan: FinalizationPlan) => Promise<SpaceArtifactValidation>;
 
 type EndedEvent = {
   targetSessionKey: string;
@@ -91,6 +99,7 @@ export class FlowosExecutionRuntime {
     private readonly deliverResultCard: ResultCardDelivery,
     private readonly logger: RuntimeLogger,
     private readonly locks: ExecutionLocks,
+    private readonly validatePlannedArtifact?: PlannedArtifactValidator,
   ) {}
 
   async subagentEnded(event: EndedEvent, ctx: SubagentContext): Promise<void> {
@@ -125,7 +134,12 @@ export class FlowosExecutionRuntime {
       await this.bindings.save(pending);
       const version = await this.syncTerminalLocked(pending);
       if (version !== null) {
-        wake = { binding: pending, outcome, version };
+        const synced = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+        if (outcome === "ok" && synced?.status === "ENDED_OK" && synced.finalizationPlan) {
+          await this.syncOwnerClosureLocked(synced);
+        } else {
+          wake = { binding: synced ?? pending, outcome, version };
+        }
       }
     });
     if (wake) {
@@ -244,9 +258,17 @@ export class FlowosExecutionRuntime {
           if (current?.status.endsWith("_PENDING_SYNC")) {
             const version = await this.syncTerminalLocked(current);
             if (version !== null) {
-              this.wakeRequester(current, current.outcome ?? "error", version);
-              if (current.outcome === "ok") {
-                this.watchOwnerClosure(current);
+              const synced = await this.bindings.byExecution(
+                current.executionId,
+                current.attemptId,
+              );
+              if (synced?.status === "ENDED_OK" && synced.finalizationPlan) {
+                await this.syncOwnerClosureLocked(synced);
+              } else {
+                this.wakeRequester(synced ?? current, current.outcome ?? "error", version);
+                if (current.outcome === "ok") {
+                  this.watchOwnerClosure(synced ?? current);
+                }
               }
             }
           }
@@ -404,7 +426,10 @@ export class FlowosExecutionRuntime {
   }
 
   private async syncOwnerClosureLocked(binding: RunBinding): Promise<void> {
-    if (binding.resultDelivery && binding.resultDelivery.status !== "DELIVERED") {
+    if (binding.resultDelivery?.status === "DELIVERED") {
+      return;
+    }
+    if (binding.resultDelivery) {
       try {
         await this.syncResultDeliveryLocked(binding);
       } catch (error) {
@@ -412,6 +437,35 @@ export class FlowosExecutionRuntime {
           `FlowOS Execution result delivery deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
         );
         await this.watchResultDeliveryIfPending(binding);
+      }
+      return;
+    }
+    if (binding.finalizationFailure) {
+      try {
+        await this.syncPlannedFailureLocked(binding);
+      } catch (error) {
+        this.logger.warn(
+          `FlowOS Execution planned failure sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+        );
+        this.watchOwnerClosure(binding);
+      }
+      return;
+    }
+    if (binding.finalizationPlan) {
+      try {
+        await this.syncPlannedFinalizationLocked(binding);
+      } catch (error) {
+        this.logger.warn(
+          `FlowOS Execution planned finalization deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+        );
+        try {
+          await this.deferPlannedFinalizationLocked(binding);
+        } catch (deferError) {
+          this.logger.warn(
+            `FlowOS Execution planned finalization failure sync deferred for ${binding.executionId}: ${deferError instanceof Error ? deferError.message : "error"}`,
+          );
+          this.watchOwnerClosure(binding);
+        }
       }
       return;
     }
@@ -450,6 +504,143 @@ export class FlowosExecutionRuntime {
       );
       this.watchOwnerClosure(binding);
     }
+  }
+
+  private async syncPlannedFinalizationLocked(binding: RunBinding): Promise<void> {
+    const plan = binding.finalizationPlan;
+    if (!plan || !this.validatePlannedArtifact) {
+      throw new Error("FlowOS Execution planned finalizer is unavailable");
+    }
+    const detail = await this.client.detail(binding.executionId);
+    if (
+      detail.currentAttemptId !== binding.attemptId ||
+      detail.ownerAgentId !== binding.ownerAgentId ||
+      !activeStatuses.has(detail.status)
+    ) {
+      await this.bindings.save({
+        ...binding,
+        status: "ENDED_ERROR",
+        outcome: "planned_finalization_no_longer_active",
+        updatedAt: Date.now(),
+      });
+      this.markTerminal(binding);
+      return;
+    }
+    if (detail.spaceId !== plan.spaceId || detail.stageKey !== "validating") {
+      throw new Error("FlowOS Execution planned result no longer matches the active Execution");
+    }
+
+    let validation: SpaceArtifactValidation;
+    try {
+      validation = await this.validatePlannedArtifact(plan);
+    } catch (error) {
+      const failedValidation: RunBinding = {
+        ...binding,
+        finalizationFailure: {
+          errorCode: "VALIDATION_FAILED",
+          retryable: false,
+          outcome: "planned_validation_failed",
+        },
+        updatedAt: Date.now(),
+      };
+      await this.bindings.save(failedValidation);
+      await this.syncPlannedFailureLocked(failedValidation);
+      this.logger.warn(
+        `FlowOS Execution planned artifact validation failed for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+      );
+      return;
+    }
+
+    const resultRef = await this.client.registerSpaceArtifact(binding.executionId, {
+      attemptId: binding.attemptId,
+      expectedVersion: detail.version,
+      title: plan.artifactTitle,
+      filePath: plan.artifactFilePath,
+      artifactType: plan.artifactType,
+      ...validation,
+    });
+    await this.prepareAndCompleteResult(binding, {
+      expectedVersion: detail.version,
+      resultRef,
+      card: {
+        spaceId: plan.spaceId,
+        artifactTitle: plan.artifactTitle,
+        artifactFilePath: plan.artifactFilePath,
+        caption: plan.cardCaption,
+      },
+    });
+  }
+
+  private async syncPlannedFailureLocked(binding: RunBinding): Promise<void> {
+    const failure = binding.finalizationFailure;
+    if (!failure) {
+      throw new Error("FlowOS Execution planned failure is unavailable");
+    }
+    const detail = await this.client.detail(binding.executionId);
+    if (
+      detail.currentAttemptId === binding.attemptId &&
+      detail.ownerAgentId === binding.ownerAgentId &&
+      activeStatuses.has(detail.status)
+    ) {
+      await this.client.fail(binding.executionId, {
+        expectedVersion: detail.version,
+        errorCode: failure.errorCode,
+        retryable: failure.retryable,
+      });
+    }
+    const failed: RunBinding = {
+      ...binding,
+      status: "ENDED_ERROR",
+      outcome: failure.outcome,
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(failed);
+    this.markTerminal(failed);
+  }
+
+  private async deferPlannedFinalizationLocked(binding: RunBinding): Promise<void> {
+    const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+    if (!current || current.status !== "ENDED_OK") {
+      return;
+    }
+    if (current.finalizationFailure) {
+      this.watchOwnerClosure(current);
+      return;
+    }
+    if (
+      current.resultDelivery?.status === "PREPARED" ||
+      current.resultDelivery?.status === "EXECUTION_COMPLETED"
+    ) {
+      this.watchOwnerClosure(current);
+      return;
+    }
+    const retryCount = current.closureWakeCount ?? 0;
+    if (retryCount < maxClosureWakeRetries) {
+      const retrying = {
+        ...current,
+        closureWakeCount: retryCount + 1,
+        updatedAt: Date.now(),
+      };
+      await this.bindings.save(retrying);
+      this.watchOwnerClosure(retrying);
+      return;
+    }
+    const detail = await latestStillNeedsSync(this.client, current);
+    if (detail) {
+      await this.client.fail(current.executionId, {
+        expectedVersion: detail.version,
+        errorCode: "INTERNAL",
+        retryable: true,
+      });
+    }
+    const failed: RunBinding = {
+      ...current,
+      status: "ENDED_ERROR",
+      outcome: "planned_finalization_failed",
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(failed);
+    this.markTerminal(failed);
   }
 
   private async syncResultDeliveryLocked(binding: RunBinding): Promise<ActiveExecution> {
@@ -566,9 +757,14 @@ export class FlowosExecutionRuntime {
         if (current?.status.endsWith("_PENDING_SYNC")) {
           const version = await this.syncTerminalLocked(current);
           if (version !== null) {
-            this.wakeRequester(current, current.outcome ?? "error", version);
-            if (current.outcome === "ok") {
-              this.watchOwnerClosure(current);
+            const synced = await this.bindings.byExecution(current.executionId, current.attemptId);
+            if (synced?.status === "ENDED_OK" && synced.finalizationPlan) {
+              await this.syncOwnerClosureLocked(synced);
+            } else {
+              this.wakeRequester(synced ?? current, current.outcome ?? "error", version);
+              if (current.outcome === "ok") {
+                this.watchOwnerClosure(synced ?? current);
+              }
             }
           }
           return;
@@ -591,7 +787,7 @@ export class FlowosExecutionRuntime {
     }
     const timer = setTimeout(() => {
       guards.delete(key);
-      void task().catch((error) => {
+      void task().catch((error: unknown) => {
         this.logger.warn(
           `FlowOS Execution guard failed for ${key}: ${error instanceof Error ? error.message : "error"}`,
         );
