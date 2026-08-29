@@ -1187,10 +1187,6 @@ function appendHeartbeatFileDirectives(prompt: string, heartbeatFileContent?: st
   return `${prompt}\n\nAdditional context from HEARTBEAT.md:\n${directives}`;
 }
 
-function isBackgroundTaskPayloadEvent(event: SystemEvent): boolean {
-  return !isExecCompletionEvent(event.text) && !event.contextKey?.startsWith("cron:");
-}
-
 function resolveHeartbeatRunPrompt(params: {
   cfg: OpenClawConfig;
   heartbeat?: HeartbeatConfig;
@@ -1203,11 +1199,10 @@ function resolveHeartbeatRunPrompt(params: {
   useHeartbeatResponseTool: boolean;
 }): HeartbeatPromptResolution {
   const pendingEventEntries = params.preflight.pendingEventEntries;
-  const backgroundTaskEventEntries =
+  const backgroundTaskEvents =
     params.preflight.isBackgroundTaskWake && params.preflight.shouldInspectPendingEvents
-      ? pendingEventEntries.filter(isBackgroundTaskPayloadEvent)
+      ? pendingEventEntries.map((event) => event.text)
       : [];
-  const backgroundTaskEvents = backgroundTaskEventEntries.map((event) => event.text);
   const hasBackgroundTaskEvents = backgroundTaskEvents.length > 0;
   const cronEvents = pendingEventEntries
     .filter(
@@ -1327,7 +1322,7 @@ function selectSystemEventsConsumedByHeartbeat(params: {
     return [];
   }
   if (params.hasBackgroundTaskEvents) {
-    return preflight.pendingEventEntries.filter(isBackgroundTaskPayloadEvent);
+    return preflight.pendingEventEntries;
   }
   if (params.hasExecCompletion) {
     return preflight.pendingEventEntries.filter((event) => isExecCompletionEvent(event.text));
