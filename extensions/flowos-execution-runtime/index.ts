@@ -17,6 +17,13 @@ const pluginId = "flowos-execution-runtime";
 const bindingNamespace = "run-bindings";
 const executionRuntimePurpose = "flowos-execution-runtime-v1";
 const standardOwnerAgentId = "agent:main";
+const nodeSendKey = Symbol.for("openclaw.gateway.nodeSendToSession");
+
+type NodeSend = (sessionKey: string, event: string, payload: unknown) => void;
+
+function getNodeSend(): NodeSend | undefined {
+  return (globalThis as Record<PropertyKey, unknown>)[nodeSendKey] as NodeSend | undefined;
+}
 
 type ResultCardParams = {
   sessionKey: string;
@@ -31,6 +38,7 @@ type ResultCardParams = {
 export async function deliverExecutionResultCard(
   params: ResultCardParams,
   inject: typeof injectMessageBySessionKey = injectMessageBySessionKey,
+  nodeSend: NodeSend | undefined = getNodeSend(),
 ): Promise<void> {
   const cardJson = JSON.stringify({
     type: "resource_card",
@@ -47,6 +55,7 @@ export async function deliverExecutionResultCard(
   if (!delivered.ok) {
     throw new Error("FlowOS Execution result card delivery is unavailable");
   }
+  nodeSend?.(params.sessionKey, "canvas.card.push", { cardJson });
 }
 
 function loadPrivateSecretFile(filePath: string): string {
@@ -104,6 +113,14 @@ export default definePluginEntry({
       deliverExecutionResultCard,
       api.logger,
       locks,
+      (plan) =>
+        validateSpaceArtifact({
+          runtime: api.runtime,
+          workspaceDir: plan.workspaceDir,
+          spaceId: plan.spaceId,
+          filePath: plan.artifactFilePath,
+          artifactType: plan.artifactType,
+        }),
     );
 
     api.registerTool(

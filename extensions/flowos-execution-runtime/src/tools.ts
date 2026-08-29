@@ -7,13 +7,19 @@ import type {
 } from "openclaw/plugin-sdk/plugin-entry";
 import { isSubagentSessionKey } from "openclaw/plugin-sdk/routing";
 import { Type } from "typebox";
-import { childSessionKey, type RunBinding, RunBindingStore } from "./bindings.js";
+import {
+  childSessionKey,
+  type FinalizationPlan,
+  type RunBinding,
+  RunBindingStore,
+} from "./bindings.js";
 import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
 import { FlowosExecutionRuntime } from "./runtime.js";
 import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
+const plannedRoutebookTaskKind = "ROUTEBOOK_GENERATION";
 const errorCodes = [
   "AUTHORIZATION_DENIED",
   "GRANT_EXPIRED",
@@ -48,6 +54,31 @@ function requireSession(context: OpenClawPluginToolContext): string {
     throw new Error("FlowOS Execution tools require a trusted session context");
   }
   return sessionKey;
+}
+
+function requireWorkspaceDir(context: OpenClawPluginToolContext): string {
+  const workspaceDir = context.workspaceDir?.trim();
+  if (!workspaceDir) {
+    throw new Error("FlowOS Execution result plan requires a trusted workspace");
+  }
+  return workspaceDir;
+}
+
+function sameFinalizationPlan(
+  actual: FinalizationPlan | undefined,
+  expected: FinalizationPlan | undefined,
+): boolean {
+  if (!actual || !expected) {
+    return actual === expected;
+  }
+  return (
+    actual.workspaceDir === expected.workspaceDir &&
+    actual.spaceId === expected.spaceId &&
+    actual.artifactTitle === expected.artifactTitle &&
+    actual.artifactFilePath === expected.artifactFilePath &&
+    actual.artifactType === expected.artifactType &&
+    actual.cardCaption === expected.cardCaption
+  );
 }
 
 function contextAgentId(context: OpenClawPluginToolContext): string {
@@ -149,6 +180,7 @@ function executionBinding(params: {
   attemptId: string;
   requesterSessionKey: string;
   ownerAgentId: string;
+  taskKind: string;
 }): RunBinding {
   const now = Date.now();
   return {
@@ -223,6 +255,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             attemptId,
             requesterSessionKey,
             ownerAgentId: deps.ownerAgentId,
+            taskKind: params.taskKind,
           });
           await deps.bindings.save(binding);
         }
@@ -304,6 +337,18 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         attemptId: Type.String({ minLength: 1, maxLength: 128 }),
         agentId: Type.String({ minLength: 1, maxLength: 64 }),
         task: Type.String({ minLength: 1, maxLength: 100_000 }),
+        resultPlan: Type.Optional(
+          Type.Object(
+            {
+              spaceId: Type.String({ minLength: 1, maxLength: 128 }),
+              artifactTitle: Type.String({ minLength: 1, maxLength: 160 }),
+              artifactFilePath: Type.String({ minLength: 1, maxLength: 512 }),
+              artifactType: Type.Union([Type.Literal("html"), Type.Literal("markdown")]),
+              cardCaption: Type.String({ minLength: 1, maxLength: 500 }),
+            },
+            { additionalProperties: false },
+          ),
+        ),
       },
       { additionalProperties: false },
     ),
@@ -313,8 +358,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         attemptId: string;
         agentId: string;
         task: string;
+        resultPlan?: Omit<FinalizationPlan, "workspaceDir">;
       };
       const requesterSessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
+      const finalizationPlan = params.resultPlan
+        ? { ...params.resultPlan, workspaceDir: requireWorkspaceDir(deps.context) }
+        : undefined;
       let rejected: { error: unknown; binding: RunBinding } | undefined;
       const result = await deps.locks.run(params.executionId, params.attemptId, async () => {
         const current = await deps.bindings.byExecution(params.executionId, params.attemptId);
@@ -322,9 +371,17 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(current, requesterSessionKey, deps.ownerAgentId);
+        if (current.taskKind === plannedRoutebookTaskKind && !finalizationPlan) {
+          throw new Error(
+            "ROUTEBOOK_GENERATION spawn requires resultPlan with spaceId, artifactTitle, artifactFilePath, artifactType, and cardCaption",
+          );
+        }
         if (current.targetAgentId) {
           if (current.targetAgentId !== params.agentId) {
             throw new Error("FlowOS Execution Attempt is already assigned to another agent");
+          }
+          if (!sameFinalizationPlan(current.finalizationPlan, finalizationPlan)) {
+            throw new Error("FlowOS Execution result plan does not match the accepted spawn");
           }
           return current;
         }
@@ -336,6 +393,9 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         ) {
           throw new Error("FlowOS Execution is not eligible for subagent spawn");
         }
+        if (finalizationPlan && detail.spaceId !== finalizationPlan.spaceId) {
+          throw new Error("FlowOS Execution result plan does not match the bound space");
+        }
         const childKey = childSessionKey(params.agentId, params.executionId, params.attemptId);
         const runId = stableRunId(params.executionId, params.attemptId, params.agentId);
         const claim = await deps.bindings.claimSpawn({
@@ -344,6 +404,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           targetAgentId: params.agentId,
           childSessionKey: childKey,
           runId,
+          finalizationPlan,
           now: Date.now(),
         });
         if (!claim.claimed) {
