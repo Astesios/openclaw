@@ -11,6 +11,18 @@ export type RunBindingStatus =
   | "SPAWN_FAILED_PENDING_SYNC"
   | "SPAWN_FAILED";
 
+export type ResultDelivery = {
+  status: "PREPARED" | "EXECUTION_COMPLETED" | "DELIVERED" | "ABORTED";
+  expectedVersion: number;
+  resultRef: { type: "SPACE_ARTIFACT"; id: string; spaceId: string };
+  card: {
+    spaceId: string;
+    artifactTitle: string;
+    artifactFilePath: string;
+    caption: string;
+  };
+};
+
 export type RunBinding = {
   executionId: string;
   attemptId: string;
@@ -22,6 +34,7 @@ export type RunBinding = {
   status: RunBindingStatus;
   outcome?: string;
   closureWakeCount?: number;
+  resultDelivery?: ResultDelivery;
   createdAt: number;
   updatedAt: number;
 };

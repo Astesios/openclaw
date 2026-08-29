@@ -40,15 +40,6 @@ type ToolDeps = {
     filePath: string;
     artifactType: "html" | "markdown";
   }) => Promise<SpaceArtifactValidation>;
-  deliverResultCard: (params: {
-    sessionKey: string;
-    executionId: string;
-    attemptId: string;
-    spaceId: string;
-    artifactTitle: string;
-    artifactFilePath: string;
-    caption: string;
-  }) => Promise<void>;
 };
 
 function requireSession(context: OpenClawPluginToolContext): string {
@@ -456,21 +447,16 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           artifactType: params.artifactType,
           ...validation,
         });
-        await deps.deliverResultCard({
-          sessionKey,
-          executionId: params.executionId,
-          attemptId: params.attemptId,
-          spaceId: params.spaceId,
-          artifactTitle: params.artifactTitle,
-          artifactFilePath: params.artifactFilePath,
-          caption: params.cardCaption,
-        });
-        const item = await deps.client.complete({
-          executionId: params.executionId,
+        const item = await deps.runtime.prepareAndCompleteResult(binding, {
           expectedVersion: current.version,
           resultRef,
+          card: {
+            spaceId: params.spaceId,
+            artifactTitle: params.artifactTitle,
+            artifactFilePath: params.artifactFilePath,
+            caption: params.cardCaption,
+          },
         });
-        deps.runtime.markTerminal(binding);
         return jsonResult(item);
       });
     },

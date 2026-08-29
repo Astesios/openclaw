@@ -69,6 +69,11 @@ function fakeClient(options?: {
     path: string,
     payload?: Record<string, unknown>,
   ) => Promise<void> | void;
+  afterRequest?: (
+    method: "GET" | "POST",
+    path: string,
+    payload?: Record<string, unknown>,
+  ) => Promise<void> | void;
 }) {
   const calls: Array<{ method: string; path: string; payload?: Record<string, unknown> }> = [];
   let item: ActiveExecution = {
@@ -108,10 +113,17 @@ function fakeClient(options?: {
         stageKey: String(payload?.stageKey),
       };
     } else if (path.endsWith("/complete")) {
-      item = { ...item, status: "SUCCEEDED", version: item.version + 1, stageKey: "completed" };
+      item = {
+        ...item,
+        status: "SUCCEEDED",
+        version: item.version + 1,
+        stageKey: "completed",
+        resultRef: payload?.resultRef as ActiveExecution["resultRef"],
+      };
     } else if (path.endsWith("/fail")) {
       item = { ...item, status: "FAILED", version: item.version + 1, stageKey: "failed" };
     }
+    await options?.afterRequest?.(method, path, payload);
     return item;
   });
   return { client: new FlowosExecutionClient(request), calls, getItem: () => item };
@@ -175,6 +187,7 @@ function tools(params?: {
   const subagent = params?.subagent ?? fakeSubagent();
   const system = params?.system ?? fakeSystem();
   const locks = params?.locks ?? new ExecutionLocks();
+  const deliverResultCard = params?.deliverResultCard ?? vi.fn<ResultCardDelivery>();
   const runtime =
     params?.runtime ??
     new FlowosExecutionRuntime(
@@ -182,6 +195,7 @@ function tools(params?: {
       bindings,
       subagent as never,
       system as never,
+      deliverResultCard,
       { warn: vi.fn(), info: vi.fn() },
       locks,
     );
@@ -191,7 +205,6 @@ function tools(params?: {
       validatorId: "lushu-html-v1" as const,
       contentSha256: "a".repeat(64),
     }));
-  const deliverResultCard = params?.deliverResultCard ?? vi.fn<ResultCardDelivery>();
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
     context: params?.context ?? { agentId: "main", sessionKey: "agent:main:main" },
@@ -201,7 +214,6 @@ function tools(params?: {
     runtime,
     ownerAgentId: "agent:main",
     validateArtifact,
-    deliverResultCard,
   });
   return {
     byName: new Map(created.map((tool) => [tool.name, tool])),
@@ -704,8 +716,8 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(events.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
       events.indexOf("result-card"),
     );
-    expect(events.indexOf("result-card")).toBeLessThan(
-      events.indexOf("/api/executions/execution-1/complete"),
+    expect(events.indexOf("/api/executions/execution-1/complete")).toBeLessThan(
+      events.indexOf("result-card"),
     );
     expect(owner.validateArtifact).toHaveBeenCalledOnce();
     const registration = assist.calls.find((call) => call.path.endsWith("/space-artifacts"));
@@ -729,12 +741,59 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(schema).not.toContain("CASE_DETAIL");
   });
 
-  it("keeps validating when durable result-card delivery fails and completes on retry", async () => {
-    const assist = fakeClient();
-    const deliverResultCard = vi
-      .fn<ResultCardDelivery>()
-      .mockRejectedValueOnce(new Error("transcript unavailable"))
-      .mockResolvedValue(undefined);
+  it("retries durable result-card delivery after Execution succeeds without repeating complete", async () => {
+    vi.useFakeTimers();
+    try {
+      const assist = fakeClient();
+      const deliverResultCard = vi
+        .fn<ResultCardDelivery>()
+        .mockRejectedValueOnce(new Error("transcript unavailable"))
+        .mockResolvedValue(undefined);
+      const owner = tools({ client: assist.client, deliverResultCard });
+      await startSpaceExecution(owner.byName);
+      await markChildEndedOk(owner);
+      await assist.client.stage("execution-1", {
+        expectedVersion: 1,
+        stageKey: "validating",
+        stageLabel: "正在验证结果",
+      });
+      await expect(
+        owner.byName.get("flowos_execution_complete")?.execute("complete-1", {
+          executionId: "execution-1",
+          attemptId: "attempt-1",
+          expectedVersion: 2,
+          spaceId: "sp-trip",
+          artifactTitle: "旅行路书",
+          artifactFilePath: "generated/lushu.html",
+          artifactType: "html",
+          cardCaption: "路书做好啦，点开看看～",
+        }),
+      ).rejects.toThrow("transcript unavailable");
+      expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        resultDelivery: { status: "EXECUTION_COMPLETED" },
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(deliverResultCard).toHaveBeenCalledTimes(2);
+      expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(1);
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        resultDelivery: { status: "DELIVERED" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never delivers a success card when Assist complete fails", async () => {
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (path.endsWith("/complete")) {
+          throw new Error("Assist complete unavailable");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
     const owner = tools({ client: assist.client, deliverResultCard });
     await startSpaceExecution(owner.byName);
     await markChildEndedOk(owner);
@@ -743,25 +802,85 @@ describe("FlowOS Execution plugin boundaries", () => {
       stageKey: "validating",
       stageLabel: "正在验证结果",
     });
-    const input = {
-      executionId: "execution-1",
-      attemptId: "attempt-1",
-      expectedVersion: 2,
-      spaceId: "sp-trip",
-      artifactTitle: "旅行路书",
-      artifactFilePath: "generated/lushu.html",
-      artifactType: "html" as const,
-      cardCaption: "路书做好啦，点开看看～",
-    };
     await expect(
-      owner.byName.get("flowos_execution_complete")?.execute("complete-1", input),
-    ).rejects.toThrow("transcript unavailable");
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("Assist complete unavailable");
     expect(assist.getItem()).toMatchObject({ status: "RUNNING", stageKey: "validating" });
-    expect(assist.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "PREPARED" },
+    });
+    await assist.client.fail("execution-1", {
+      expectedVersion: 2,
+      errorCode: "CANCELLED_BY_USER",
+      retryable: false,
+    });
+    await owner.runtime.reconcile();
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "ENDED_ERROR",
+      resultDelivery: { status: "ABORTED" },
+    });
+  });
 
-    await owner.byName.get("flowos_execution_complete")?.execute("complete-2", input);
-    expect(deliverResultCard).toHaveBeenCalledTimes(2);
+  it("recovers a lost complete response after Gateway restart and delivers one card", async () => {
+    let loseResponse = true;
+    const assist = fakeClient({
+      afterRequest(_method, path) {
+        if (loseResponse && path.endsWith("/complete")) {
+          loseResponse = false;
+          throw new Error("complete response lost");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("complete response lost");
     expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
+    expect(deliverResultCard).not.toHaveBeenCalled();
+
+    const restarted = new FlowosExecutionRuntime(
+      assist.client,
+      owner.bindings,
+      owner.subagent,
+      owner.system,
+      deliverResultCard,
+      { warn: vi.fn(), info: vi.fn() },
+      owner.locks,
+    );
+    await restarted.reconcile();
+    expect(deliverResultCard).toHaveBeenCalledOnce();
+    expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(1);
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "DELIVERED" },
+    });
   });
 });
 
@@ -782,6 +901,7 @@ describe("FlowOS Execution typed hooks", () => {
         bindings,
         subagent as never,
         system as never,
+        vi.fn<ResultCardDelivery>(),
         logger,
         new ExecutionLocks(),
       ),
@@ -982,6 +1102,7 @@ describe("FlowOS Execution typed hooks", () => {
       bindings,
       subagent as never,
       system as never,
+      vi.fn<ResultCardDelivery>(),
       { warn: vi.fn(), info: vi.fn() },
       new ExecutionLocks(),
     );

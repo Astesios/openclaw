@@ -1,6 +1,6 @@
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
-import { RunBindingStore, type RunBinding } from "./bindings.js";
-import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
+import { RunBindingStore, type ResultDelivery, type RunBinding } from "./bindings.js";
+import { FlowosExecutionClient, type ActiveExecution, type SpaceArtifactRef } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
@@ -16,6 +16,16 @@ type RuntimeLogger = {
 };
 
 type RuntimeSystem = Pick<PluginRuntime["system"], "enqueueSystemEvent" | "requestHeartbeat">;
+
+type ResultCardDelivery = (params: {
+  sessionKey: string;
+  executionId: string;
+  attemptId: string;
+  spaceId: string;
+  artifactTitle: string;
+  artifactFilePath: string;
+  caption: string;
+}) => Promise<void>;
 
 type EndedEvent = {
   targetSessionKey: string;
@@ -61,6 +71,14 @@ async function latestStillNeedsSync(
   return detail;
 }
 
+function sameResultRef(actual: ActiveExecution["resultRef"], expected: SpaceArtifactRef): boolean {
+  return (
+    actual?.type === expected.type &&
+    actual.id === expected.id &&
+    actual.spaceId === expected.spaceId
+  );
+}
+
 export class FlowosExecutionRuntime {
   private readonly spawnGuards = new Map<string, NodeJS.Timeout>();
   private readonly closureGuards = new Map<string, NodeJS.Timeout>();
@@ -70,6 +88,7 @@ export class FlowosExecutionRuntime {
     private readonly bindings: RunBindingStore,
     private readonly subagent: PluginRuntime["subagent"],
     private readonly system: RuntimeSystem,
+    private readonly deliverResultCard: ResultCardDelivery,
     private readonly logger: RuntimeLogger,
     private readonly locks: ExecutionLocks,
   ) {}
@@ -153,6 +172,33 @@ export class FlowosExecutionRuntime {
     const key = this.bindingKey(binding);
     this.clearGuard(this.spawnGuards, key);
     this.clearGuard(this.closureGuards, key);
+  }
+
+  async prepareAndCompleteResult(
+    binding: RunBinding,
+    params: {
+      expectedVersion: number;
+      resultRef: SpaceArtifactRef;
+      card: ResultDelivery["card"];
+    },
+  ): Promise<ActiveExecution> {
+    const prepared: RunBinding = {
+      ...binding,
+      resultDelivery: {
+        status: "PREPARED",
+        expectedVersion: params.expectedVersion,
+        resultRef: params.resultRef,
+        card: params.card,
+      },
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(prepared);
+    try {
+      return await this.syncResultDeliveryLocked(prepared);
+    } catch (error) {
+      this.watchOwnerClosure(prepared);
+      throw error;
+    }
   }
 
   async reconcile(): Promise<void> {
@@ -347,6 +393,17 @@ export class FlowosExecutionRuntime {
   }
 
   private async syncOwnerClosureLocked(binding: RunBinding): Promise<void> {
+    if (binding.resultDelivery && binding.resultDelivery.status !== "DELIVERED") {
+      try {
+        await this.syncResultDeliveryLocked(binding);
+      } catch (error) {
+        this.logger.warn(
+          `FlowOS Execution result delivery deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+        );
+        this.watchOwnerClosure(binding);
+      }
+      return;
+    }
     try {
       const detail = await latestStillNeedsSync(this.client, binding);
       if (!detail) {
@@ -382,6 +439,66 @@ export class FlowosExecutionRuntime {
       );
       this.watchOwnerClosure(binding);
     }
+  }
+
+  private async syncResultDeliveryLocked(binding: RunBinding): Promise<ActiveExecution> {
+    const delivery = binding.resultDelivery;
+    if (!delivery) {
+      throw new Error("FlowOS Execution result delivery is not prepared");
+    }
+    let detail = await this.client.detail(binding.executionId);
+    if (delivery.status === "ABORTED") {
+      throw new Error("FlowOS Execution result delivery was aborted");
+    }
+    if (delivery.status === "DELIVERED") {
+      return detail;
+    }
+    if (activeStatuses.has(detail.status)) {
+      if (
+        detail.currentAttemptId !== binding.attemptId ||
+        detail.version !== delivery.expectedVersion
+      ) {
+        throw new Error("FlowOS Execution changed after result preparation");
+      }
+      detail = await this.client.complete({
+        executionId: binding.executionId,
+        expectedVersion: delivery.expectedVersion,
+        resultRef: delivery.resultRef,
+      });
+    }
+    if (detail.status !== "SUCCEEDED" || !sameResultRef(detail.resultRef, delivery.resultRef)) {
+      const aborted: RunBinding = {
+        ...binding,
+        status: "ENDED_ERROR",
+        outcome: "result_delivery_aborted",
+        resultDelivery: { ...delivery, status: "ABORTED" },
+        updatedAt: Date.now(),
+      };
+      await this.bindings.save(aborted);
+      this.markTerminal(aborted);
+      throw new Error("FlowOS Execution did not complete with the prepared result");
+    }
+
+    const completed: RunBinding = {
+      ...binding,
+      resultDelivery: { ...delivery, status: "EXECUTION_COMPLETED" },
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(completed);
+    await this.deliverResultCard({
+      sessionKey: binding.requesterSessionKey,
+      executionId: binding.executionId,
+      attemptId: binding.attemptId,
+      ...delivery.card,
+    });
+    const delivered: RunBinding = {
+      ...completed,
+      resultDelivery: { ...delivery, status: "DELIVERED" },
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(delivered);
+    this.markTerminal(delivered);
+    return detail;
   }
 
   private wakeRequester(binding: RunBinding, outcome: string, version: number): void {

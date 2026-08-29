@@ -101,6 +101,7 @@ export default definePluginEntry({
       bindings,
       api.runtime.subagent,
       api.runtime.system,
+      deliverExecutionResultCard,
       api.logger,
       locks,
     );
@@ -126,7 +127,6 @@ export default definePluginEntry({
               ...params,
             });
           },
-          deliverResultCard: deliverExecutionResultCard,
         }),
       {
         names: [
