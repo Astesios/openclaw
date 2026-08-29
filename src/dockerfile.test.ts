@@ -113,7 +113,9 @@ describe("Dockerfile", () => {
     expect(workflow).toContain("JCR push 失败（${n}/3）");
     expect(workflow).toContain("return 1");
     expect(workflow).toContain("docker buildx imagetools inspect");
-    expect(workflow).toContain("JCR digest 不匹配");
+    expect(workflow).toContain("跨Registry的manifest digest不会保持一致");
+    expect(workflow).not.toContain("JCR digest 不匹配");
+    expect(workflow).not.toContain('verify "$AMD64_DIGEST"');
   });
 
   it("uses the Docker target platform for pnpm install and prune", async () => {

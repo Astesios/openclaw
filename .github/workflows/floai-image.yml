@@ -139,17 +139,10 @@ jobs:
             done
             return 1
           }
-          verify() {  # $1=expected digest  $2=JCR tag
-            actual="$(docker buildx imagetools inspect "${JCR_IMG}:$2" --format '{{.Manifest.Digest}}')"
-            [ "$actual" = "$1" ] || {
-              echo "JCR digest 不匹配: tag=$2 expected=$1 actual=$actual" >&2
-              return 1
-            }
-          }
           AMD64_DIGEST="$(cat amd64)"
           ARM64_DIGEST="$(cat arm64)"
           push "$AMD64_DIGEST" "${TAG}"
           push "$ARM64_DIGEST" "${TAG}-arm64"
-          verify "$AMD64_DIGEST" "${TAG}"
-          verify "$ARM64_DIGEST" "${TAG}-arm64"
+          # JCR会把GHCR的OCI manifest重新序列化，跨Registry的manifest digest不会保持一致。
+          # docker push成功已证明目标Registry接受镜像；不要把manifest字节级等值当作内容等价。
           echo "✓ JCR: ${JCR_IMG}:${TAG}(amd64) + ${JCR_IMG}:${TAG}-arm64(arm64)"
