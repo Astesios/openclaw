@@ -424,8 +424,9 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(await bindings.byExecution("execution-1", "attempt-1")).toBeUndefined();
   });
 
-  it("persists one deterministic requester result card before completion", async () => {
+  it("delivers one live requester card after its durable transcript append", async () => {
     const inject = vi.fn(async () => ({ ok: true, messageId: "message-1" }));
+    const nodeSend = vi.fn();
     const params = {
       sessionKey: "agent:main:main",
       executionId: "execution-1",
@@ -435,9 +436,8 @@ describe("FlowOS Execution plugin boundaries", () => {
       artifactFilePath: "generated/lushu.html",
       caption: "路书做好啦，点开看看～",
     };
-    await deliverExecutionResultCard(params, inject);
-    await deliverExecutionResultCard(params, inject);
-    expect(inject).toHaveBeenCalledTimes(2);
+    await deliverExecutionResultCard(params, inject, nodeSend);
+    expect(inject).toHaveBeenCalledOnce();
     expect(inject).toHaveBeenCalledWith(
       params.sessionKey,
       expect.stringContaining(
@@ -446,6 +446,34 @@ describe("FlowOS Execution plugin boundaries", () => {
       undefined,
       { idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card" },
     );
+    expect(nodeSend).toHaveBeenCalledOnce();
+    expect(nodeSend).toHaveBeenCalledWith("main", "canvas.card.push", {
+      cardJson: expect.stringContaining(
+        '"filePath":"generated/lushu.html","action":"create","caption":"路书做好啦，点开看看～"',
+      ),
+    });
+    expect(inject.mock.invocationCallOrder[0]).toBeLessThan(nodeSend.mock.invocationCallOrder[0]);
+  });
+
+  it("does not publish a live card when its durable transcript append fails", async () => {
+    const inject = vi.fn(async () => ({ ok: false, error: "transcript unavailable" }));
+    const nodeSend = vi.fn();
+    await expect(
+      deliverExecutionResultCard(
+        {
+          sessionKey: "agent:main:session-1",
+          executionId: "execution-1",
+          attemptId: "attempt-1",
+          spaceId: "sp-trip",
+          artifactTitle: "旅行路书",
+          artifactFilePath: "generated/lushu.html",
+          caption: "路书做好啦，点开看看～",
+        },
+        inject,
+        nodeSend,
+      ),
+    ).rejects.toThrow("result card delivery is unavailable");
+    expect(nodeSend).not.toHaveBeenCalled();
   });
 
   it("allows only native loopback and Compose Assist origins", () => {
