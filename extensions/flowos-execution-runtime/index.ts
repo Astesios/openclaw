@@ -25,8 +25,9 @@ function getNodeSend(): NodeSend | undefined {
   return (globalThis as Record<PropertyKey, unknown>)[nodeSendKey] as NodeSend | undefined;
 }
 
-function toNodeSessionKey(sessionKey: string): string {
-  return sessionKey.replace(/^agent:[^:]+:/, "");
+function nodeSessionKeys(sessionKey: string): string[] {
+  const shortKey = sessionKey.replace(/^agent:[^:]+:/, "");
+  return shortKey === sessionKey ? [sessionKey] : [sessionKey, shortKey];
 }
 
 type ResultCardParams = {
@@ -59,7 +60,9 @@ export async function deliverExecutionResultCard(
   if (!delivered.ok) {
     throw new Error("FlowOS Execution result card delivery is unavailable");
   }
-  nodeSend?.(toNodeSessionKey(params.sessionKey), "canvas.card.push", { cardJson });
+  for (const sessionKey of nodeSessionKeys(params.sessionKey)) {
+    nodeSend?.(sessionKey, "canvas.card.push", { cardJson });
+  }
 }
 
 function loadPrivateSecretFile(filePath: string): string {

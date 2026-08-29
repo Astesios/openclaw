@@ -446,13 +446,35 @@ describe("FlowOS Execution plugin boundaries", () => {
       undefined,
       { idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card" },
     );
-    expect(nodeSend).toHaveBeenCalledOnce();
-    expect(nodeSend).toHaveBeenCalledWith("main", "canvas.card.push", {
+    expect(nodeSend).toHaveBeenCalledTimes(2);
+    const payload = {
       cardJson: expect.stringContaining(
         '"filePath":"generated/lushu.html","action":"create","caption":"路书做好啦，点开看看～"',
       ),
-    });
+    };
+    expect(nodeSend).toHaveBeenNthCalledWith(1, "agent:main:main", "canvas.card.push", payload);
+    expect(nodeSend).toHaveBeenNthCalledWith(2, "main", "canvas.card.push", payload);
     expect(inject.mock.invocationCallOrder[0]).toBeLessThan(nodeSend.mock.invocationCallOrder[0]);
+  });
+
+  it("publishes a short requester key only once", async () => {
+    const inject = vi.fn(async () => ({ ok: true, messageId: "message-1" }));
+    const nodeSend = vi.fn();
+    await deliverExecutionResultCard(
+      {
+        sessionKey: "session-1",
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        caption: "路书做好啦，点开看看～",
+      },
+      inject,
+      nodeSend,
+    );
+    expect(nodeSend).toHaveBeenCalledOnce();
+    expect(nodeSend).toHaveBeenCalledWith("session-1", "canvas.card.push", expect.any(Object));
   });
 
   it("does not publish a live card when its durable transcript append fails", async () => {
