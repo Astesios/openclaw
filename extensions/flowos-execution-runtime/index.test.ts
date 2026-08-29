@@ -2,11 +2,7 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import plugin, {
-  clearRuntimeSecretForTest,
-  consumeRuntimeToken,
-  normalizeOwnerAgentId,
-} from "./index.js";
+import plugin, { deriveExecutionRuntimeToken } from "./index.js";
 import { RunBindingStore, type RunBinding } from "./src/bindings.js";
 import {
   type ActiveExecution,
@@ -23,7 +19,6 @@ const originalEnv = { ...process.env };
 
 afterEach(() => {
   process.env = { ...originalEnv };
-  clearRuntimeSecretForTest();
 });
 
 function memoryStore<T>(): PluginStateKeyedStore<T> {
@@ -253,33 +248,50 @@ describe("FlowOS Execution plugin boundaries", () => {
     }
   });
 
-  it("normalizes only explicit safe owner agent ids", () => {
-    expect(normalizeOwnerAgentId("agent:main")).toBe("agent:main");
-    expect(normalizeOwnerAgentId("main")).toBeNull();
-    expect(normalizeOwnerAgentId("agent:../main")).toBeNull();
-  });
-
-  it("consumes a mode-600 one-shot token file and rejects process-env secrets", () => {
+  it("derives a purpose-bound token from the standard tenant identity secret", () => {
     const directory = mkdtempSync(join(tmpdir(), "flowos-execution-secret-"));
-    const tokenFile = join(directory, "writer.token");
+    const tokenFile = join(directory, "task-center.secret");
     try {
-      writeFileSync(tokenFile, "t".repeat(64), { mode: 0o600 });
+      writeFileSync(tokenFile, "m".repeat(64), { mode: 0o600 });
       chmodSync(tokenFile, 0o600);
-      expect(consumeRuntimeToken({ LONG_TASK_EXECUTION_TOKEN_FILE: tokenFile })).toBe(
-        "t".repeat(64),
+      const expected = "0ecc68db70cad88ff066009cf3a1af6b8abfdf0dff4f2cb59c72e8e557e44c4a";
+      expect(deriveExecutionRuntimeToken({ FLOWOS_TASK_CENTER_JWT_SECRET: "m".repeat(64) })).toBe(
+        expected,
       );
-      expect(existsSync(tokenFile)).toBe(false);
-      clearRuntimeSecretForTest();
-      expect(consumeRuntimeToken({ LONG_TASK_EXECUTION_TOKEN: "x".repeat(64) })).toBeNull();
+      expect(deriveExecutionRuntimeToken({ FLOWOS_TASK_CENTER_JWT_SECRET_FILE: tokenFile })).toBe(
+        expected,
+      );
+      expect(existsSync(tokenFile)).toBe(true);
+      chmodSync(tokenFile, 0o644);
+      expect(
+        deriveExecutionRuntimeToken({ FLOWOS_TASK_CENTER_JWT_SECRET_FILE: tokenFile }),
+      ).toBeNull();
+      expect(deriveExecutionRuntimeToken({ LONG_TASK_EXECUTION_TOKEN: "x".repeat(64) })).toBeNull();
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   });
 
-  it("registers no tools when private runtime config is missing", () => {
-    delete process.env.LONG_TASK_EXECUTION_TOKEN;
-    delete process.env.LONG_TASK_EXECUTION_TOKEN_FILE;
-    delete process.env.LONG_TASK_EXECUTION_AGENT_ID;
+  it("rejects registration without the standard tenant identity secret", () => {
+    delete process.env.FLOWOS_TASK_CENTER_JWT_SECRET;
+    delete process.env.FLOWOS_TASK_CENTER_JWT_SECRET_FILE;
+    expect(() =>
+      plugin.register({
+        runtime: {
+          state: { openKeyedStore: () => memoryStore() },
+          subagent: fakeSubagent(),
+          system: fakeSystem(),
+        },
+        registerTool: vi.fn(),
+        on: vi.fn(),
+        logger: { warn: vi.fn(), info: vi.fn() },
+      } as never),
+    ).toThrow("standard tenant identity config is required");
+  });
+
+  it("registers all tools from standard tenant identity without execution-specific config", () => {
+    process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
+    process.env.ASSIST_API_BASE = "http://assist:18790";
     const registerTool = vi.fn();
     plugin.register({
       runtime: {
@@ -292,7 +304,12 @@ describe("FlowOS Execution plugin boundaries", () => {
       logger: { warn: vi.fn(), info: vi.fn() },
     } as never);
     const factory = registerTool.mock.calls[0]?.[0] as (context: unknown) => unknown;
-    expect(factory({ agentId: "main", sessionKey: "agent:main:main" })).toBeNull();
+    const registered = factory({
+      agentId: "main",
+      sessionKey: "agent:main:main",
+      workspaceDir: "/tmp/workspace",
+    });
+    expect(registered).toHaveLength(5);
   });
 
   it("tool schemas never expose owner identity endpoint or credential arguments", () => {
