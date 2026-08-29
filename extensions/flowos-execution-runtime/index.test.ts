@@ -2,7 +2,7 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import plugin, { deriveExecutionRuntimeToken } from "./index.js";
+import plugin, { deliverExecutionResultCard, deriveExecutionRuntimeToken } from "./index.js";
 import { RunBindingStore, type RunBinding } from "./src/bindings.js";
 import {
   type ActiveExecution,
@@ -63,8 +63,78 @@ function memoryStore<T>(): PluginStateKeyedStore<T> {
   };
 }
 
+function ttlAwareMemoryStore<T>() {
+  let now = 0;
+  const values = new Map<string, { value: T; createdAt: number; expiresAt?: number }>();
+  const prune = () => {
+    for (const [key, entry] of values) {
+      if (entry.expiresAt !== undefined && entry.expiresAt <= now) {
+        values.delete(key);
+      }
+    }
+  };
+  const store: PluginStateKeyedStore<T> = {
+    async register(key, value, opts) {
+      values.set(key, {
+        value,
+        createdAt: now,
+        ...(opts?.ttlMs ? { expiresAt: now + opts.ttlMs } : {}),
+      });
+    },
+    async registerIfAbsent(key, value, opts) {
+      prune();
+      if (values.has(key)) {
+        return false;
+      }
+      await store.register(key, value, opts);
+      return true;
+    },
+    async update(key, updateValue, opts) {
+      prune();
+      const next = updateValue(values.get(key)?.value);
+      if (next === undefined) {
+        values.delete(key);
+      } else {
+        await store.register(key, next, opts);
+      }
+      return true;
+    },
+    async lookup(key) {
+      prune();
+      return values.get(key)?.value;
+    },
+    async consume(key) {
+      prune();
+      const value = values.get(key)?.value;
+      values.delete(key);
+      return value;
+    },
+    async delete(key) {
+      return values.delete(key);
+    },
+    async entries() {
+      prune();
+      return [...values.entries()].map(([key, entry]) => Object.assign({ key }, entry));
+    },
+    async clear() {
+      values.clear();
+    },
+  };
+  return {
+    store,
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+
 function fakeClient(options?: {
   beforeRequest?: (
+    method: "GET" | "POST",
+    path: string,
+    payload?: Record<string, unknown>,
+  ) => Promise<void> | void;
+  afterRequest?: (
     method: "GET" | "POST",
     path: string,
     payload?: Record<string, unknown>,
@@ -108,13 +178,27 @@ function fakeClient(options?: {
         stageKey: String(payload?.stageKey),
       };
     } else if (path.endsWith("/complete")) {
-      item = { ...item, status: "SUCCEEDED", version: item.version + 1, stageKey: "completed" };
+      item = {
+        ...item,
+        status: "SUCCEEDED",
+        version: item.version + 1,
+        stageKey: "completed",
+        resultRef: payload?.resultRef as ActiveExecution["resultRef"],
+      };
     } else if (path.endsWith("/fail")) {
       item = { ...item, status: "FAILED", version: item.version + 1, stageKey: "failed" };
     }
+    await options?.afterRequest?.(method, path, payload);
     return item;
   });
-  return { client: new FlowosExecutionClient(request), calls, getItem: () => item };
+  return {
+    client: new FlowosExecutionClient(request),
+    calls,
+    getItem: () => item,
+    setItem: (next: Partial<ActiveExecution>) => {
+      item = { ...item, ...next };
+    },
+  };
 }
 
 function fakeSubagent() {
@@ -124,6 +208,9 @@ function fakeSubagent() {
     })),
     waitForRun: vi.fn<PluginRuntime["subagent"]["waitForRun"]>(async () => ({
       status: "timeout",
+    })),
+    getRunStatus: vi.fn<PluginRuntime["subagent"]["getRunStatus"]>(async () => ({
+      status: "missing",
     })),
     getSessionMessages: vi.fn<PluginRuntime["subagent"]["getSessionMessages"]>(async () => ({
       messages: [],
@@ -146,6 +233,16 @@ type ArtifactValidator = (params: {
   artifactType: "html" | "markdown";
 }) => Promise<SpaceArtifactValidation>;
 
+type ResultCardDelivery = (params: {
+  sessionKey: string;
+  executionId: string;
+  attemptId: string;
+  spaceId: string;
+  artifactTitle: string;
+  artifactFilePath: string;
+  caption: string;
+}) => Promise<void>;
+
 function tools(params?: {
   context?: { agentId?: string; sessionKey?: string };
   client?: FlowosExecutionClient;
@@ -155,12 +252,14 @@ function tools(params?: {
   locks?: ExecutionLocks;
   runtime?: FlowosExecutionRuntime;
   validateArtifact?: ArtifactValidator;
+  deliverResultCard?: ResultCardDelivery;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
   const subagent = params?.subagent ?? fakeSubagent();
   const system = params?.system ?? fakeSystem();
   const locks = params?.locks ?? new ExecutionLocks();
+  const deliverResultCard = params?.deliverResultCard ?? vi.fn<ResultCardDelivery>();
   const runtime =
     params?.runtime ??
     new FlowosExecutionRuntime(
@@ -168,6 +267,7 @@ function tools(params?: {
       bindings,
       subagent as never,
       system as never,
+      deliverResultCard,
       { warn: vi.fn(), info: vi.fn() },
       locks,
     );
@@ -195,6 +295,7 @@ function tools(params?: {
     locks,
     runtime,
     validateArtifact,
+    deliverResultCard,
   };
 }
 
@@ -233,6 +334,82 @@ async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
 }
 
 describe("FlowOS Execution plugin boundaries", () => {
+  it("keeps pending result delivery beyond terminal TTL and expires only after delivery", async () => {
+    const clock = ttlAwareMemoryStore<RunBinding>();
+    const bindings = new RunBindingStore(clock.store);
+    const base: RunBinding = {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      requesterSessionKey: "agent:main:main",
+      ownerAgentId: "agent:main",
+      targetAgentId: "worker",
+      childSessionKey: "agent:worker:subagent:flowos-1",
+      runId: "run-1",
+      status: "ENDED_OK",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const pending = {
+      expectedVersion: 2,
+      resultRef: { type: "SPACE_ARTIFACT" as const, id: "art-1", spaceId: "sp-trip" },
+      card: {
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        caption: "路书做好啦，点开看看～",
+      },
+    };
+
+    await bindings.save(base);
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "PREPARED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "EXECUTION_COMPLETED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "DELIVERED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeUndefined();
+  });
+
+  it("persists one deterministic requester result card before completion", async () => {
+    const inject = vi.fn(async () => ({ ok: true, messageId: "message-1" }));
+    const params = {
+      sessionKey: "agent:main:main",
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      caption: "路书做好啦，点开看看～",
+    };
+    await deliverExecutionResultCard(params, inject);
+    await deliverExecutionResultCard(params, inject);
+    expect(inject).toHaveBeenCalledTimes(2);
+    expect(inject).toHaveBeenCalledWith(
+      params.sessionKey,
+      expect.stringContaining(
+        '[celia_card]{"type":"resource_card","resourceType":"file","id":"sp-trip"',
+      ),
+      undefined,
+      { idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card" },
+    );
+  });
+
   it("allows only native loopback and Compose Assist origins", () => {
     expect(resolveTrustedAssistEndpoint(undefined)?.origin).toBe("http://127.0.0.1:18790");
     expect(resolveTrustedAssistEndpoint("http://assist:18790")?.origin).toBe("http://assist:18790");
@@ -293,6 +470,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
     process.env.ASSIST_API_BASE = "http://assist:18790";
     const registerTool = vi.fn();
+    const on = vi.fn();
     plugin.register({
       runtime: {
         state: { openKeyedStore: () => memoryStore() },
@@ -300,7 +478,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         system: fakeSystem(),
       },
       registerTool,
-      on: vi.fn(),
+      on,
       logger: { warn: vi.fn(), info: vi.fn() },
     } as never);
     const factory = registerTool.mock.calls[0]?.[0] as (context: unknown) => unknown;
@@ -310,6 +488,7 @@ describe("FlowOS Execution plugin boundaries", () => {
       workspaceDir: "/tmp/workspace",
     });
     expect(registered).toHaveLength(5);
+    expect(on.mock.calls.map((call) => call[0])).toEqual(["subagent_ended", "gateway_start"]);
   });
 
   it("tool schemas never expose owner identity endpoint or credential arguments", () => {
@@ -453,6 +632,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("owner tool is unavailable");
   });
@@ -490,6 +670,28 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(subagent.run).toHaveBeenCalledOnce();
     const schema = JSON.stringify(owner.byName.get("flowos_execution_spawn")?.parameters);
     expect(schema).not.toContain("idempotencyKey");
+  });
+
+  it("keeps an accepted multi-minute child active past the owner spawn guard", async () => {
+    vi.useFakeTimers();
+    try {
+      const assist = fakeClient();
+      const owner = tools({ client: assist.client });
+      await startExecution(owner.byName);
+      await owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        agentId: "worker",
+        task: "generate a routebook for several minutes",
+      });
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "RUNNING",
+      });
+      expect(assist.calls.some((call) => call.path.endsWith("/fail"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("serializes concurrent spawn calls into one atomic run claim", async () => {
@@ -548,6 +750,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("has not ended successfully");
   });
@@ -564,6 +767,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("has not ended successfully");
     expect(owner.validateArtifact).not.toHaveBeenCalled();
@@ -602,8 +806,16 @@ describe("FlowOS Execution plugin boundaries", () => {
   });
 
   it("complete registers the bound Space Artifact before completing the owner Execution", async () => {
-    const assist = fakeClient();
-    const owner = tools({ client: assist.client });
+    const events: string[] = [];
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        events.push(path);
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>(async () => {
+      events.push("result-card");
+    });
+    const owner = tools({ client: assist.client, deliverResultCard });
     await startSpaceExecution(owner.byName);
     await markChildEndedOk(owner);
     await assist.client.stage("execution-1", {
@@ -619,10 +831,17 @@ describe("FlowOS Execution plugin boundaries", () => {
       artifactTitle: "旅行路书",
       artifactFilePath: "generated/lushu.html",
       artifactType: "html",
+      cardCaption: "路书做好啦，点开看看～",
     });
     const paths = assist.calls.map((call) => call.path);
     expect(paths.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
       paths.indexOf("/api/executions/execution-1/complete"),
+    );
+    expect(events.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
+      events.indexOf("result-card"),
+    );
+    expect(events.indexOf("/api/executions/execution-1/complete")).toBeLessThan(
+      events.indexOf("result-card"),
     );
     expect(owner.validateArtifact).toHaveBeenCalledOnce();
     const registration = assist.calls.find((call) => call.path.endsWith("/space-artifacts"));
@@ -630,10 +849,235 @@ describe("FlowOS Execution plugin boundaries", () => {
       validatorId: "lushu-html-v1",
       contentSha256: "a".repeat(64),
     });
+    expect(owner.deliverResultCard).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      caption: "路书做好啦，点开看看～",
+    });
     const schema = JSON.stringify(owner.byName.get("flowos_execution_complete")?.parameters);
+    expect(schema).toContain("cardCaption");
     expect(schema).not.toContain("resultId");
     expect(schema).not.toContain("RESOURCE");
     expect(schema).not.toContain("CASE_DETAIL");
+  });
+
+  it("retries durable result-card delivery after Execution succeeds without repeating complete", async () => {
+    vi.useFakeTimers();
+    try {
+      const assist = fakeClient();
+      const deliverResultCard = vi
+        .fn<ResultCardDelivery>()
+        .mockRejectedValueOnce(new Error("transcript unavailable"))
+        .mockResolvedValue(undefined);
+      const owner = tools({ client: assist.client, deliverResultCard });
+      await startSpaceExecution(owner.byName);
+      await markChildEndedOk(owner);
+      await assist.client.stage("execution-1", {
+        expectedVersion: 1,
+        stageKey: "validating",
+        stageLabel: "正在验证结果",
+      });
+      await expect(
+        owner.byName.get("flowos_execution_complete")?.execute("complete-1", {
+          executionId: "execution-1",
+          attemptId: "attempt-1",
+          expectedVersion: 2,
+          spaceId: "sp-trip",
+          artifactTitle: "旅行路书",
+          artifactFilePath: "generated/lushu.html",
+          artifactType: "html",
+          cardCaption: "路书做好啦，点开看看～",
+        }),
+      ).rejects.toThrow("transcript unavailable");
+      expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        resultDelivery: { status: "EXECUTION_COMPLETED" },
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(deliverResultCard).toHaveBeenCalledTimes(2);
+      expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(1);
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        resultDelivery: { status: "DELIVERED" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("freezes owner stage and fails the same Attempt after prepared version drift", async () => {
+    let loseFailResponse = true;
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (path.endsWith("/complete")) {
+          throw new Error("Assist complete unavailable");
+        }
+      },
+      afterRequest(_method, path) {
+        if (loseFailResponse && path.endsWith("/fail")) {
+          loseFailResponse = false;
+          throw new Error("fail response lost");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("Assist complete unavailable");
+    expect(assist.getItem()).toMatchObject({ status: "RUNNING", stageKey: "validating" });
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "PREPARED" },
+    });
+    await expect(
+      owner.byName.get("flowos_execution_stage")?.execute("late-owner-stage", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        stageKey: "late",
+        stageLabel: "迟到阶段",
+      }),
+    ).rejects.toThrow("stage is frozen after result preparation");
+    await assist.client.stage("execution-1", {
+      expectedVersion: 2,
+      stageKey: "external-drift",
+      stageLabel: "外部版本漂移",
+    });
+    await owner.runtime.reconcile();
+    expect(assist.getItem()).toMatchObject({ status: "FAILED", version: 4 });
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "PREPARED" },
+    });
+    await owner.runtime.reconcile();
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "ENDED_ERROR",
+      outcome: "result_delivery_aborted",
+      resultDelivery: { status: "ABORTED" },
+    });
+  });
+
+  it("aborts only the old delivery when Assist switches to a new Attempt", async () => {
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (path.endsWith("/complete")) {
+          throw new Error("Assist complete unavailable");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("Assist complete unavailable");
+    assist.setItem({
+      currentAttemptId: "attempt-2",
+      status: "RUNNING",
+      version: 3,
+      stageKey: "retrying",
+    });
+
+    await owner.runtime.reconcile();
+    expect(assist.getItem()).toMatchObject({
+      currentAttemptId: "attempt-2",
+      status: "RUNNING",
+      version: 3,
+    });
+    expect(assist.calls.filter((call) => call.path.endsWith("/fail"))).toHaveLength(0);
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "ENDED_ERROR",
+      outcome: "result_attempt_replaced",
+      resultDelivery: { status: "ABORTED" },
+    });
+  });
+
+  it("recovers a lost complete response after Gateway restart and delivers one card", async () => {
+    let loseResponse = true;
+    const assist = fakeClient({
+      afterRequest(_method, path) {
+        if (loseResponse && path.endsWith("/complete")) {
+          loseResponse = false;
+          throw new Error("complete response lost");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("complete response lost");
+    expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
+    expect(deliverResultCard).not.toHaveBeenCalled();
+
+    const restarted = new FlowosExecutionRuntime(
+      assist.client,
+      owner.bindings,
+      owner.subagent,
+      owner.system,
+      deliverResultCard,
+      { warn: vi.fn(), info: vi.fn() },
+      owner.locks,
+    );
+    await restarted.reconcile();
+    expect(deliverResultCard).toHaveBeenCalledOnce();
+    expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(1);
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "DELIVERED" },
+    });
   });
 });
 
@@ -654,6 +1098,7 @@ describe("FlowOS Execution typed hooks", () => {
         bindings,
         subagent as never,
         system as never,
+        vi.fn<ResultCardDelivery>(),
         logger,
         new ExecutionLocks(),
       ),
@@ -709,6 +1154,66 @@ describe("FlowOS Execution typed hooks", () => {
         sessionKey: value.requesterSessionKey,
       }),
     );
+  });
+
+  it("fails an owner Execution when spawn does not follow start", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const binding: RunBinding = {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        requesterSessionKey: "agent:main:main",
+        ownerAgentId: "agent:main",
+        status: "CREATED",
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      await ctx.bindings.save(binding);
+      ctx.instance.watchOwnerSpawn(binding);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+      expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-wakes an unfinished successful child then fails instead of remaining active", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.bindings.save({ ...value, runId: "run-1", status: "RUNNING" });
+      await ctx.instance.subagentEnded(
+        {
+          targetSessionKey: value.childSessionKey!,
+          targetKind: "subagent",
+          runId: "run-1",
+          outcome: "ok",
+        },
+        { childSessionKey: value.childSessionKey, requesterSessionKey: value.requesterSessionKey },
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.system.requestHeartbeat).toHaveBeenCalledTimes(3);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "ENDED_OK",
+        closureWakeCount: 2,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 3 });
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "ENDED_ERROR",
+        outcome: "owner_closure_failed",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("serializes an ended hook ahead of a late child stage", async () => {
@@ -794,6 +1299,7 @@ describe("FlowOS Execution typed hooks", () => {
       bindings,
       subagent as never,
       system as never,
+      vi.fn<ResultCardDelivery>(),
       { warn: vi.fn(), info: vi.fn() },
       new ExecutionLocks(),
     );
@@ -853,14 +1359,67 @@ describe("FlowOS Execution typed hooks", () => {
   });
 
   it("fails closed after restart when a spawn claim was never accepted", async () => {
-    const ctx = runtime();
-    const value = await pending(ctx.bindings);
-    await ctx.instance.reconcile();
-    expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
-      status: "SPAWN_FAILED",
-    });
-    expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
-    expect(ctx.subagent.waitForRun).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+      expect(ctx.subagent.getRunStatus).toHaveBeenCalledWith({
+        runId: value.runId ?? "",
+        sessionKey: value.childSessionKey,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails closed after restart when the owner never attempted spawn", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      await ctx.bindings.save({
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        requesterSessionKey: "agent:main:main",
+        ownerAgentId: "agent:main",
+        status: "CREATED",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a durably accepted child when RUNNING checkpoint was not saved", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.bindings.save({ ...value, runId: "run-1" });
+      ctx.subagent.getRunStatus.mockResolvedValue({ status: "running" });
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "RUNNING",
+        runId: "run-1",
+      });
+      expect(ctx.assist.calls.some((call) => call.path.endsWith("/fail"))).toBe(false);
+      expect(ctx.subagent.run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("timeout end maps to a retryable provider timeout failure", async () => {

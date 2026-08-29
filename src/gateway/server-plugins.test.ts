@@ -1,6 +1,7 @@
 // Gateway plugin tests cover plugin loading, auto-enable, runtime registry setup,
 // request-scope injection, diagnostics, and handler dispatch integration.
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { registerSubagentRun, resetSubagentRegistryForTests } from "../agents/subagent-registry.js";
 import type { PluginLookUpTable } from "../plugins/plugin-lookup-table.js";
 import type { PluginRegistry } from "../plugins/registry.js";
 import type { PluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
@@ -367,6 +368,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  resetSubagentRegistryForTests();
   clearActivatedPluginRuntimeState.mockClear();
   loadOpenClawPlugins.mockReset();
   loadPluginLookUpTable.mockReset().mockReturnValue({
@@ -405,6 +407,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetSubagentRegistryForTests();
   serverPluginsModule.clearFallbackGatewayContext();
   runtimeModule.clearGatewaySubagentRuntime();
   runtimeRegistryModule.resetPluginRuntimeStateForTest();
@@ -783,6 +786,37 @@ describe("loadGatewayPlugins", () => {
     ).resolves.toEqual({
       messages: [{ id: "m-3" }],
     });
+  });
+
+  test("reads durable plugin subagent acceptance by stable run and session", async () => {
+    const runtime = await createSubagentRuntime(serverPluginsModule);
+    await expect(
+      runtime.getRunStatus({ runId: "run-missing", sessionKey: "agent:main:subagent:missing" }),
+    ).resolves.toEqual({ status: "missing" });
+
+    registerSubagentRun({
+      runId: "run-flowos-1",
+      childSessionKey: "agent:main:subagent:flowos-1",
+      controllerSessionKey: "agent:main:main",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "generate routebook",
+      cleanup: "keep",
+      expectsCompletionMessage: false,
+      spawnMode: "run",
+    });
+    await expect(
+      runtime.getRunStatus({
+        runId: "run-flowos-1",
+        sessionKey: "agent:main:subagent:flowos-1",
+      }),
+    ).resolves.toEqual({ status: "running" });
+    await expect(
+      runtime.getRunStatus({
+        runId: "different-run",
+        sessionKey: "agent:main:subagent:flowos-1",
+      }),
+    ).resolves.toEqual({ status: "missing" });
   });
 
   test("times out while waiting for the first in-process gateway response", async () => {

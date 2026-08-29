@@ -33,6 +33,16 @@ export type SubagentWaitResult = {
   error?: string;
 };
 
+export type SubagentRunStatusParams = {
+  runId: string;
+  sessionKey: string;
+};
+
+export type SubagentRunStatusResult =
+  | { status: "missing" }
+  | { status: "running" }
+  | { status: "ended"; outcome: "ok" | "error" | "timeout" };
+
 export type SubagentGetSessionMessagesParams = {
   sessionKey: string;
   limit?: number;
@@ -87,6 +97,7 @@ export type PluginRuntime = PluginRuntimeCore & {
   subagent: {
     run: (params: SubagentRunParams) => Promise<SubagentRunResult>;
     waitForRun: (params: SubagentWaitParams) => Promise<SubagentWaitResult>;
+    getRunStatus: (params: SubagentRunStatusParams) => Promise<SubagentRunStatusResult>;
     getSessionMessages: (
       params: SubagentGetSessionMessagesParams,
     ) => Promise<SubagentGetSessionMessagesResult>;

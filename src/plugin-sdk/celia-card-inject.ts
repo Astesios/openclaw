@@ -27,6 +27,7 @@ export async function injectMessageBySessionKey(
   sessionKey: string,
   message: string,
   label?: string,
+  options?: { idempotencyKey?: string },
 ): Promise<GatewayInjectedTranscriptAppendResult> {
   const entry = loadSessionEntryByKey(sessionKey);
   const sessionId = entry?.sessionId;
@@ -44,5 +45,6 @@ export async function injectMessageBySessionKey(
     sessionKey,
     message,
     ...(label !== undefined ? { label } : {}),
+    ...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
   });
 }

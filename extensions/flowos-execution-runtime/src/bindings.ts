@@ -11,6 +11,18 @@ export type RunBindingStatus =
   | "SPAWN_FAILED_PENDING_SYNC"
   | "SPAWN_FAILED";
 
+export type ResultDelivery = {
+  status: "PREPARED" | "EXECUTION_COMPLETED" | "DELIVERED" | "ABORTED";
+  expectedVersion: number;
+  resultRef: { type: "SPACE_ARTIFACT"; id: string; spaceId: string };
+  card: {
+    spaceId: string;
+    artifactTitle: string;
+    artifactFilePath: string;
+    caption: string;
+  };
+};
+
 export type RunBinding = {
   executionId: string;
   attemptId: string;
@@ -21,14 +33,24 @@ export type RunBinding = {
   runId?: string;
   status: RunBindingStatus;
   outcome?: string;
+  closureWakeCount?: number;
+  resultDelivery?: ResultDelivery;
   createdAt: number;
   updatedAt: number;
 };
 
 const terminalBindingTtlMs = 6 * 60 * 60 * 1_000;
 
-function isTerminalBinding(status: RunBindingStatus): boolean {
-  return status === "ENDED_OK" || status === "ENDED_ERROR" || status === "SPAWN_FAILED";
+function isExpirableBinding(binding: RunBinding): boolean {
+  if (binding.status === "ENDED_ERROR" || binding.status === "SPAWN_FAILED") {
+    return true;
+  }
+  if (binding.status !== "ENDED_OK") {
+    return false;
+  }
+  return (
+    binding.resultDelivery?.status === "DELIVERED" || binding.resultDelivery?.status === "ABORTED"
+  );
 }
 
 export class RunBindingStore {
@@ -52,7 +74,7 @@ export class RunBindingStore {
     await this.store.register(
       this.executionKey(binding.executionId, binding.attemptId),
       binding,
-      isTerminalBinding(binding.status) ? { ttlMs: terminalBindingTtlMs } : undefined,
+      isExpirableBinding(binding) ? { ttlMs: terminalBindingTtlMs } : undefined,
     );
   }
 

@@ -213,18 +213,20 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("Assist created an Execution without a current Attempt");
         }
         const current = await deps.bindings.byExecution(item.executionId, attemptId);
+        let binding: RunBinding;
         if (current) {
           requireOwnerBinding(current, requesterSessionKey, deps.ownerAgentId);
+          binding = current;
         } else {
-          await deps.bindings.save(
-            executionBinding({
-              executionId: item.executionId,
-              attemptId,
-              requesterSessionKey,
-              ownerAgentId: deps.ownerAgentId,
-            }),
-          );
+          binding = executionBinding({
+            executionId: item.executionId,
+            attemptId,
+            requesterSessionKey,
+            ownerAgentId: deps.ownerAgentId,
+          });
+          await deps.bindings.save(binding);
         }
+        deps.runtime.watchOwnerSpawn(binding);
         return jsonResult(item);
       });
     },
@@ -273,6 +275,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           (isSubagentSessionKey(requireSession(deps.context)) && latestBinding.status !== "RUNNING")
         ) {
           throw new Error("child progress capability is no longer active");
+        }
+        if (
+          latestBinding.resultDelivery?.status === "PREPARED" ||
+          latestBinding.resultDelivery?.status === "EXECUTION_COMPLETED"
+        ) {
+          throw new Error("FlowOS Execution stage is frozen after result preparation");
         }
         const item = await deps.client.stage(params.executionId, {
           expectedVersion: current.version,
@@ -374,6 +382,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           updatedAt: Date.now(),
         };
         await deps.bindings.save(running);
+        deps.runtime.markSpawnAccepted(running);
         return running;
       });
       if (rejected) {
@@ -388,7 +397,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
     name: "flowos_execution_complete",
     label: "FlowOS Execution Complete",
     description:
-      "Register one validated generated Space Artifact and complete the owner Execution.",
+      "Register one validated Space Artifact, persist its requester card, then complete the owner Execution.",
     executionMode: "sequential",
     parameters: Type.Object(
       {
@@ -399,6 +408,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         artifactTitle: Type.String({ minLength: 1, maxLength: 160 }),
         artifactFilePath: Type.String({ minLength: 1, maxLength: 512 }),
         artifactType: Type.Union([Type.Literal("html"), Type.Literal("markdown")]),
+        cardCaption: Type.String({ minLength: 1, maxLength: 500 }),
       },
       { additionalProperties: false },
     ),
@@ -411,6 +421,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         artifactTitle: string;
         artifactFilePath: string;
         artifactType: "html" | "markdown";
+        cardCaption: string;
       };
       return await deps.locks.run(params.executionId, params.attemptId, async () => {
         const sessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
@@ -442,10 +453,15 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           artifactType: params.artifactType,
           ...validation,
         });
-        const item = await deps.client.complete({
-          executionId: params.executionId,
+        const item = await deps.runtime.prepareAndCompleteResult(binding, {
           expectedVersion: current.version,
           resultRef,
+          card: {
+            spaceId: params.spaceId,
+            artifactTitle: params.artifactTitle,
+            artifactFilePath: params.artifactFilePath,
+            caption: params.cardCaption,
+          },
         });
         return jsonResult(item);
       });
@@ -488,6 +504,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           errorCode: params.errorCode,
           retryable: params.retryable ?? false,
         });
+        await deps.runtime.markOwnerFailed(binding);
         return jsonResult(item);
       });
     },

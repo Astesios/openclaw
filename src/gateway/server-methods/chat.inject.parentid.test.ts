@@ -125,4 +125,36 @@ describe("gateway chat.inject transcript writes", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("deduplicates a gateway-injected message by explicit idempotency key", async () => {
+    const { dir, transcriptPath } = createTranscriptFixtureSync({
+      prefix: "openclaw-chat-inject-idempotent-",
+      sessionId: "sess-idempotent",
+    });
+
+    try {
+      const first = await appendInjectedAssistantMessageToTranscript({
+        transcriptPath,
+        message: "first card",
+        idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card",
+      });
+      const replay = await appendInjectedAssistantMessageToTranscript({
+        transcriptPath,
+        message: "duplicate card",
+        idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card",
+      });
+
+      expect(first.ok).toBe(true);
+      expect(replay).toMatchObject({ ok: true, messageId: first.messageId });
+      const messages = readTranscriptLines(transcriptPath).filter((line) => {
+        const record = JSON.parse(line) as { type?: string };
+        return record.type === "message";
+      });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain("first card");
+      expect(messages[0]).not.toContain("duplicate card");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
