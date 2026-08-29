@@ -45,6 +45,7 @@ import {
 import { replaceGenericExternalRunFailureText } from "../auto-reply/reply/agent-runner-failure-copy.js";
 import { resolveDefaultModel } from "../auto-reply/reply/directive-handling.defaults.js";
 import {
+  HEARTBEAT_OWNS_SYSTEM_EVENTS,
   REPLY_OPERATION_RUN_STATE,
   type ReplyOperationRunState,
 } from "../auto-reply/reply/reply-operation-run-state.js";
@@ -112,6 +113,7 @@ import { resolveMainScopedEventSessionKey } from "./event-session-routing.js";
 import { isWithinActiveHours, resolveActiveHoursTimezone } from "./heartbeat-active-hours.js";
 import { recordRunStart, shouldDeferWake, type DeferDecision } from "./heartbeat-cooldown.js";
 import {
+  buildBackgroundTaskEventPrompt,
   buildCronEventPrompt,
   buildExecEventPrompt,
   isCronSystemEvent,
@@ -870,6 +872,7 @@ function normalizeHeartbeatToolNotification(
 type HeartbeatWakePayloadFlags = {
   isExecEventWake: boolean;
   isCronWake: boolean;
+  isBackgroundTaskWake: boolean;
   isWakePayload: boolean;
 };
 
@@ -974,6 +977,7 @@ function resolveHeartbeatWakePayloadFlags(params: {
   return {
     isExecEventWake: source === "exec-event",
     isCronWake: source === "cron",
+    isBackgroundTaskWake,
     isWakePayload:
       source === "hook" || source === "acp-spawn" || isBackgroundTaskWake || reason === "wake",
   };
@@ -1018,6 +1022,9 @@ async function resolveHeartbeatPreflight(params: {
   const shouldInspectWakePendingEvents = (() => {
     if (!wakeFlags.isWakePayload) {
       return false;
+    }
+    if (wakeFlags.isBackgroundTaskWake) {
+      return true;
     }
     if (params.heartbeat?.isolatedSession !== true) {
       return true;
@@ -1093,6 +1100,7 @@ async function resolveHeartbeatPreflight(params: {
 
 type HeartbeatPromptResolution = {
   prompt: string | null;
+  hasBackgroundTaskEvents: boolean;
   hasExecCompletion: boolean;
   hasRelayableExecCompletion: boolean;
   hasCronEvents: boolean;
@@ -1191,6 +1199,11 @@ function resolveHeartbeatRunPrompt(params: {
   useHeartbeatResponseTool: boolean;
 }): HeartbeatPromptResolution {
   const pendingEventEntries = params.preflight.pendingEventEntries;
+  const backgroundTaskEvents =
+    params.preflight.isBackgroundTaskWake && params.preflight.shouldInspectPendingEvents
+      ? pendingEventEntries.map((event) => event.text)
+      : [];
+  const hasBackgroundTaskEvents = backgroundTaskEvents.length > 0;
   const cronEvents = pendingEventEntries
     .filter(
       (event) =>
@@ -1229,6 +1242,7 @@ ${completionInstruction}`;
       const prompt = appendHeartbeatFileDirectives(taskListPrompt, params.heartbeatFileContent);
       return {
         prompt,
+        hasBackgroundTaskEvents: false,
         hasExecCompletion: false,
         hasRelayableExecCompletion: false,
         hasCronEvents: false,
@@ -1239,6 +1253,7 @@ ${completionInstruction}`;
     if (commitmentPrompt) {
       return {
         prompt: appendHeartbeatFileDirectives(commitmentPrompt, params.heartbeatFileContent),
+        hasBackgroundTaskEvents: false,
         hasExecCompletion: false,
         hasRelayableExecCompletion: false,
         hasCronEvents: false,
@@ -1248,6 +1263,7 @@ ${completionInstruction}`;
     }
     return {
       prompt: null,
+      hasBackgroundTaskEvents: false,
       hasExecCompletion: false,
       hasRelayableExecCompletion: false,
       hasCronEvents: false,
@@ -1257,19 +1273,24 @@ ${completionInstruction}`;
   }
 
   const baseUsesHeartbeatResponseTool = params.useHeartbeatResponseTool && !commitmentPrompt;
-  const basePrompt = hasExecCompletion
-    ? buildExecEventPrompt(execEvents, {
+  const basePrompt = hasBackgroundTaskEvents
+    ? buildBackgroundTaskEventPrompt(backgroundTaskEvents, {
         deliverToUser: params.canRelayToUser,
         useHeartbeatResponseTool: baseUsesHeartbeatResponseTool,
       })
-    : hasCronEvents
-      ? buildCronEventPrompt(cronEvents, {
+    : hasExecCompletion
+      ? buildExecEventPrompt(execEvents, {
           deliverToUser: params.canRelayToUser,
           useHeartbeatResponseTool: baseUsesHeartbeatResponseTool,
         })
-      : baseUsesHeartbeatResponseTool
-        ? resolveHeartbeatResponseToolPrompt(params.cfg, params.heartbeat)
-        : resolveHeartbeatPrompt(params.cfg, params.heartbeat);
+      : hasCronEvents
+        ? buildCronEventPrompt(cronEvents, {
+            deliverToUser: params.canRelayToUser,
+            useHeartbeatResponseTool: baseUsesHeartbeatResponseTool,
+          })
+        : baseUsesHeartbeatResponseTool
+          ? resolveHeartbeatResponseToolPrompt(params.cfg, params.heartbeat)
+          : resolveHeartbeatPrompt(params.cfg, params.heartbeat);
   const basePromptWithHint = appendHeartbeatWorkspacePathHint(basePrompt, params.workspaceDir);
   const basePromptWithDirectives = appendHeartbeatFileDirectives(
     basePromptWithHint,
@@ -1281,6 +1302,7 @@ ${completionInstruction}`;
 
   return {
     prompt,
+    hasBackgroundTaskEvents,
     hasExecCompletion,
     hasRelayableExecCompletion,
     hasCronEvents,
@@ -1291,12 +1313,16 @@ ${completionInstruction}`;
 
 function selectSystemEventsConsumedByHeartbeat(params: {
   preflight: HeartbeatPreflight;
+  hasBackgroundTaskEvents: boolean;
   hasExecCompletion: boolean;
   hasCronEvents: boolean;
 }): SystemEvent[] {
   const { preflight } = params;
   if (!preflight.shouldInspectPendingEvents || preflight.pendingEventEntries.length === 0) {
     return [];
+  }
+  if (params.hasBackgroundTaskEvents) {
+    return preflight.pendingEventEntries;
   }
   if (params.hasExecCompletion) {
     return preflight.pendingEventEntries.filter((event) => isExecCompletionEvent(event.text));
@@ -1472,7 +1498,9 @@ export async function runHeartbeatOnce(opts: {
   // a new session ID (empty transcript) each run, avoiding the cost of
   // sending the full conversation history (~100K tokens) to the LLM.
   // Delivery routing still uses the main session entry (lastChannel, lastTo).
-  const useIsolatedSession = heartbeat?.isolatedSession === true;
+  // Background task events are bound to the requester session and may require its pending tools.
+  // Keep that payload on the base session instead of running an empty isolated sibling turn.
+  const useIsolatedSession = heartbeat?.isolatedSession === true && !preflight.isBackgroundTaskWake;
   const firstDueCommitment =
     canHeartbeatDeliverCommitments(heartbeat) && dueHeartbeatTasks.length === 0
       ? preflight.dueCommitments[0]
@@ -1546,6 +1574,7 @@ export async function runHeartbeatOnce(opts: {
   });
   const {
     prompt,
+    hasBackgroundTaskEvents,
     hasExecCompletion,
     hasRelayableExecCompletion,
     hasCronEvents,
@@ -1567,6 +1596,7 @@ export async function runHeartbeatOnce(opts: {
     : [];
   const inspectedSystemEventsToConsume = selectSystemEventsConsumedByHeartbeat({
     preflight,
+    hasBackgroundTaskEvents,
     hasExecCompletion,
     hasCronEvents,
   });
@@ -1816,6 +1846,7 @@ export async function runHeartbeatOnce(opts: {
     const replyOpts = {
       isHeartbeat: true,
       [REPLY_OPERATION_RUN_STATE]: replyOperationRunState,
+      ...(hasBackgroundTaskEvents ? { [HEARTBEAT_OWNS_SYSTEM_EVENTS]: true as const } : {}),
       ...(heartbeatModelOverride ? { heartbeatModelOverride } : {}),
       suppressToolErrorWarnings,
       ...(usesHeartbeatResponseTool ? { enableHeartbeatTool: true, forceHeartbeatTool: true } : {}),

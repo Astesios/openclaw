@@ -1,6 +1,7 @@
 // Covers heartbeat handling of queued reminder system events.
 import fs from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveReplyOperationRunState } from "../auto-reply/reply/reply-operation-run-state.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import { runHeartbeatOnce } from "./heartbeat-runner.js";
@@ -247,11 +248,16 @@ describe("Ghost reminder bug (issue #13317)", () => {
     expect(sendTelegram).toHaveBeenCalled();
   });
 
-  it.each(["background-task", "background-task-blocked"] as const)(
-    "%s wake bypasses non-due periodic tasks and delivers its queued session event",
-    async (source) => {
+  it.each([
+    ["background-task", false],
+    ["background-task-blocked", false],
+    ["background-task", true],
+    ["background-task-blocked", true],
+  ] as const)(
+    "%s wake bypasses non-due periodic tasks and delivers its queued event (isolated=%s)",
+    async (source, isolatedSession) => {
       await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
-        const cfg = createLastTargetConfig({ tmpDir, storePath });
+        const cfg = createLastTargetConfig({ tmpDir, storePath, isolatedSession });
         const sessionKey = resolveMainSessionKey(cfg);
         const now = Date.now();
         await fs.writeFile(
@@ -288,8 +294,71 @@ describe("Ghost reminder bug (issue #13317)", () => {
         expect(result.status).toBe("ran");
         expect(replySpy).toHaveBeenCalledTimes(1);
         const replyContext = getFirstReplyContext(replySpy);
-        expect(replyContext.Body).toContain("Read HEARTBEAT.md");
+        expect(replyContext.SessionKey).toBe(sessionKey);
+        expect(replyContext.Body).toContain(completionEvent);
         expect(replyContext.Body).not.toContain("refresh suggestions");
+        expect(peekSystemEvents(sessionKey)).toEqual([]);
+      });
+    },
+  );
+
+  it.each(["background-task", "background-task-blocked"] as const)(
+    "%s wake retains its event across an admission race and delivers it on retry",
+    async (source) => {
+      await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+        const cfg = createLastTargetConfig({ tmpDir, storePath });
+        const sessionKey = await seedMainSessionStore(storePath, cfg, {
+          lastChannel: "telegram",
+          lastProvider: "telegram",
+          lastTo: "-100155462274",
+        });
+        const completionEvent =
+          "[FlowOS Execution] child completed; validate the artifact and complete the Execution";
+        enqueueSystemEvent(completionEvent, {
+          sessionKey,
+          contextKey: "flowos-execution:execution-1:attempt-1:ended",
+        });
+
+        replySpy.mockImplementationOnce(async (_ctx, options) => {
+          const state = resolveReplyOperationRunState(options);
+          if (state) {
+            state.admission = { status: "skipped", reason: "active-run" };
+          }
+          return undefined;
+        });
+        const first = await runHeartbeatOnce({
+          cfg,
+          agentId: "main",
+          sessionKey,
+          source,
+          intent: "immediate",
+          reason: source,
+          deps: { getReplyFromConfig: replySpy },
+        });
+
+        expect(first).toEqual({ status: "skipped", reason: "requests-in-flight" });
+        expect(peekSystemEvents(sessionKey)).toEqual([completionEvent]);
+
+        const sendTelegram = vi.fn().mockResolvedValue({
+          messageId: "m1",
+          chatId: "-100155462274",
+        });
+        replySpy.mockResolvedValueOnce({ text: "Handled the completion event" });
+        const second = await runHeartbeatOnce({
+          cfg,
+          agentId: "main",
+          sessionKey,
+          source,
+          intent: "immediate",
+          reason: source,
+          deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
+        });
+
+        expect(second.status).toBe("ran");
+        const retryContext = mockCallAt(replySpy, 1, "background task retry")[0] as {
+          Body?: string;
+        };
+        expect(retryContext.Body).toContain(completionEvent);
         expect(peekSystemEvents(sessionKey)).toEqual([]);
       });
     },
