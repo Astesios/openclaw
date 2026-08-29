@@ -21,6 +21,7 @@ export type RunBinding = {
   runId?: string;
   status: RunBindingStatus;
   outcome?: string;
+  closureWakeCount?: number;
   createdAt: number;
   updatedAt: number;
 };

@@ -245,6 +245,13 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       python3 -m pip install --no-cache-dir --break-system-packages $OPENCLAW_IMAGE_PIP_PACKAGES; \
     fi
 
+# Install additional Node CLIs needed by image-specific skills. Packages must
+# be version-pinned by the image workflow so every runtime gets the same bins.
+ARG OPENCLAW_IMAGE_NPM_PACKAGES=""
+RUN if [ -n "$OPENCLAW_IMAGE_NPM_PACKAGES" ]; then \
+      npm install --global --no-audit --no-fund $OPENCLAW_IMAGE_NPM_PACKAGES; \
+    fi
+
 # Optionally install Chromium and Xvfb for browser automation.
 # Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
 # Adds ~300MB but eliminates the 60-90s Playwright install on every container start.

@@ -213,18 +213,20 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("Assist created an Execution without a current Attempt");
         }
         const current = await deps.bindings.byExecution(item.executionId, attemptId);
+        let binding: RunBinding;
         if (current) {
           requireOwnerBinding(current, requesterSessionKey, deps.ownerAgentId);
+          binding = current;
         } else {
-          await deps.bindings.save(
-            executionBinding({
-              executionId: item.executionId,
-              attemptId,
-              requesterSessionKey,
-              ownerAgentId: deps.ownerAgentId,
-            }),
-          );
+          binding = executionBinding({
+            executionId: item.executionId,
+            attemptId,
+            requesterSessionKey,
+            ownerAgentId: deps.ownerAgentId,
+          });
+          await deps.bindings.save(binding);
         }
+        deps.runtime.watchOwnerSpawn(binding);
         return jsonResult(item);
       });
     },
@@ -374,6 +376,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           updatedAt: Date.now(),
         };
         await deps.bindings.save(running);
+        deps.runtime.markSpawnAccepted(running);
         return running;
       });
       if (rejected) {
@@ -447,6 +450,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           expectedVersion: current.version,
           resultRef,
         });
+        deps.runtime.markTerminal(binding);
         return jsonResult(item);
       });
     },
@@ -488,6 +492,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           errorCode: params.errorCode,
           retryable: params.retryable ?? false,
         });
+        deps.runtime.markTerminal(binding);
         return jsonResult(item);
       });
     },

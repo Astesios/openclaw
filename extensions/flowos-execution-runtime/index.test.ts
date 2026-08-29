@@ -293,6 +293,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     process.env.FLOWOS_TASK_CENTER_JWT_SECRET = "m".repeat(64);
     process.env.ASSIST_API_BASE = "http://assist:18790";
     const registerTool = vi.fn();
+    const on = vi.fn();
     plugin.register({
       runtime: {
         state: { openKeyedStore: () => memoryStore() },
@@ -300,7 +301,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         system: fakeSystem(),
       },
       registerTool,
-      on: vi.fn(),
+      on,
       logger: { warn: vi.fn(), info: vi.fn() },
     } as never);
     const factory = registerTool.mock.calls[0]?.[0] as (context: unknown) => unknown;
@@ -310,6 +311,7 @@ describe("FlowOS Execution plugin boundaries", () => {
       workspaceDir: "/tmp/workspace",
     });
     expect(registered).toHaveLength(5);
+    expect(on.mock.calls.map((call) => call[0])).toEqual(["subagent_ended", "gateway_start"]);
   });
 
   it("tool schemas never expose owner identity endpoint or credential arguments", () => {
@@ -490,6 +492,28 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(subagent.run).toHaveBeenCalledOnce();
     const schema = JSON.stringify(owner.byName.get("flowos_execution_spawn")?.parameters);
     expect(schema).not.toContain("idempotencyKey");
+  });
+
+  it("keeps an accepted multi-minute child active past the owner spawn guard", async () => {
+    vi.useFakeTimers();
+    try {
+      const assist = fakeClient();
+      const owner = tools({ client: assist.client });
+      await startExecution(owner.byName);
+      await owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        agentId: "worker",
+        task: "generate a routebook for several minutes",
+      });
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "RUNNING",
+      });
+      expect(assist.calls.some((call) => call.path.endsWith("/fail"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("serializes concurrent spawn calls into one atomic run claim", async () => {
@@ -711,6 +735,66 @@ describe("FlowOS Execution typed hooks", () => {
     );
   });
 
+  it("fails an owner Execution when spawn does not follow start", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const binding: RunBinding = {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        requesterSessionKey: "agent:main:main",
+        ownerAgentId: "agent:main",
+        status: "CREATED",
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      await ctx.bindings.save(binding);
+      ctx.instance.watchOwnerSpawn(binding);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+      expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-wakes an unfinished successful child then fails instead of remaining active", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.bindings.save({ ...value, runId: "run-1", status: "RUNNING" });
+      await ctx.instance.subagentEnded(
+        {
+          targetSessionKey: value.childSessionKey!,
+          targetKind: "subagent",
+          runId: "run-1",
+          outcome: "ok",
+        },
+        { childSessionKey: value.childSessionKey, requesterSessionKey: value.requesterSessionKey },
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.system.requestHeartbeat).toHaveBeenCalledTimes(3);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "ENDED_OK",
+        closureWakeCount: 2,
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 3 });
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "ENDED_ERROR",
+        outcome: "owner_closure_failed",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("serializes an ended hook ahead of a late child stage", async () => {
     let releaseValidation = () => {};
     let markValidationEntered = () => {};
@@ -861,6 +945,24 @@ describe("FlowOS Execution typed hooks", () => {
     });
     expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
     expect(ctx.subagent.waitForRun).not.toHaveBeenCalled();
+  });
+
+  it("fails closed after restart when the owner never attempted spawn", async () => {
+    const ctx = runtime();
+    await ctx.bindings.save({
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      requesterSessionKey: "agent:main:main",
+      ownerAgentId: "agent:main",
+      status: "CREATED",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await ctx.instance.reconcile();
+    expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "SPAWN_FAILED",
+    });
+    expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
   });
 
   it("timeout end maps to a retryable provider timeout failure", async () => {

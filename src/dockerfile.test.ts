@@ -13,6 +13,7 @@ const fullReleaseValidationWorkflowPath = join(
   repoRoot,
   ".github/workflows/full-release-validation.yml",
 );
+const floaiImageWorkflowPath = join(repoRoot, ".github/workflows/floai-image.yml");
 const dockerSetupDockerfilePaths = ["Dockerfile", "scripts/docker/sandbox/Dockerfile"] as const;
 const pnpmWorkspacePath = join(repoRoot, "pnpm-workspace.yaml");
 
@@ -95,6 +96,20 @@ describe("Dockerfile", () => {
       "node /app/node_modules/playwright-core/cli.js install --with-deps chromium",
     );
     expect(dockerfile).toContain("apt-get install -y --no-install-recommends xvfb");
+  });
+
+  it("supports pinned image-specific Node CLIs", async () => {
+    const dockerfile = await readFile(dockerfilePath, "utf8");
+    expect(dockerfile).toContain('ARG OPENCLAW_IMAGE_NPM_PACKAGES=""');
+    expect(dockerfile).toContain(
+      "npm install --global --no-audit --no-fund $OPENCLAW_IMAGE_NPM_PACKAGES",
+    );
+  });
+
+  it("ships FlowOS search and travel runtime dependencies in its image", async () => {
+    const workflow = await readFile(floaiImageWorkflowPath, "utf8");
+    expect(workflow).toContain("OPENCLAW_EXTENSIONS=qwen,perplexity");
+    expect(workflow).toContain("OPENCLAW_IMAGE_NPM_PACKAGES=@fly-ai/flyai-cli@1.0.16");
   });
 
   it("uses the Docker target platform for pnpm install and prune", async () => {

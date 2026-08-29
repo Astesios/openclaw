@@ -4,6 +4,11 @@ import { FlowosExecutionClient, type ActiveExecution } from "./client.js";
 import { ExecutionLocks } from "./locks.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
+// Agent lifecycle hooks can fire before automatic retries, so durable bindings
+// use bounded timers instead of treating an intermediate agent_end as terminal.
+const spawnGuardMs = 60_000;
+const closureGuardMs = 60_000;
+const maxClosureWakeRetries = 2;
 
 type RuntimeLogger = {
   warn(message: string): void;
@@ -57,6 +62,9 @@ async function latestStillNeedsSync(
 }
 
 export class FlowosExecutionRuntime {
+  private readonly spawnGuards = new Map<string, NodeJS.Timeout>();
+  private readonly closureGuards = new Map<string, NodeJS.Timeout>();
+
   constructor(
     private readonly client: FlowosExecutionClient,
     private readonly bindings: RunBindingStore,
@@ -103,15 +111,51 @@ export class FlowosExecutionRuntime {
     });
     if (wake) {
       this.wakeRequester(wake.binding, wake.outcome, wake.version);
+      if (wake.outcome === "ok") {
+        this.watchOwnerClosure(wake.binding);
+      }
     }
+  }
+
+  watchOwnerSpawn(binding: RunBinding): void {
+    const key = this.bindingKey(binding);
+    this.scheduleGuard(this.spawnGuards, key, spawnGuardMs, async () => {
+      await this.locks.run(binding.executionId, binding.attemptId, async () => {
+        const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+        if (current?.status === "SPAWN_FAILED_PENDING_SYNC") {
+          await this.syncSpawnFailureLocked(current);
+          return;
+        }
+        if (current?.status !== "CREATED" && current?.status !== "STARTING") {
+          return;
+        }
+        const pending: RunBinding = {
+          ...current,
+          status: "SPAWN_FAILED_PENDING_SYNC",
+          updatedAt: Date.now(),
+        };
+        await this.bindings.save(pending);
+        await this.syncSpawnFailureLocked(pending);
+      });
+    });
+  }
+
+  markSpawnAccepted(binding: RunBinding): void {
+    this.clearGuard(this.spawnGuards, this.bindingKey(binding));
+  }
+
+  markTerminal(binding: RunBinding): void {
+    const key = this.bindingKey(binding);
+    this.clearGuard(this.spawnGuards, key);
+    this.clearGuard(this.closureGuards, key);
   }
 
   async reconcile(): Promise<void> {
     for (const binding of await this.bindings.canonicalEntries()) {
-      if (binding.status === "STARTING") {
+      if (binding.status === "CREATED" || binding.status === "STARTING") {
         await this.locks.run(binding.executionId, binding.attemptId, async () => {
           const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
-          if (current?.status !== "STARTING") {
+          if (current?.status !== "CREATED" && current?.status !== "STARTING") {
             return;
           }
           const pending: RunBinding = {
@@ -121,6 +165,15 @@ export class FlowosExecutionRuntime {
           };
           await this.bindings.save(pending);
           await this.syncSpawnFailureLocked(pending);
+        });
+        continue;
+      }
+      if (binding.status === "ENDED_OK") {
+        await this.locks.run(binding.executionId, binding.attemptId, async () => {
+          const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+          if (current?.status === "ENDED_OK") {
+            await this.syncOwnerClosureLocked(current);
+          }
         });
         continue;
       }
@@ -140,6 +193,9 @@ export class FlowosExecutionRuntime {
             const version = await this.syncTerminalLocked(current);
             if (version !== null) {
               this.wakeRequester(current, current.outcome ?? "error", version);
+              if (current.outcome === "ok") {
+                this.watchOwnerClosure(current);
+              }
             }
           }
         });
@@ -199,10 +255,12 @@ export class FlowosExecutionRuntime {
         status: "SPAWN_FAILED",
         updatedAt: Date.now(),
       });
+      this.markTerminal(binding);
     } catch (error) {
       this.logger.warn(
         `FlowOS Execution spawn failure sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
       );
+      this.watchOwnerSpawn(binding);
     }
   }
 
@@ -239,7 +297,46 @@ export class FlowosExecutionRuntime {
       this.logger.warn(
         `FlowOS Execution terminal sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
       );
+      this.watchOwnerClosure(binding);
       return null;
+    }
+  }
+
+  private async syncOwnerClosureLocked(binding: RunBinding): Promise<void> {
+    try {
+      const detail = await latestStillNeedsSync(this.client, binding);
+      if (!detail) {
+        return;
+      }
+      const wakeCount = binding.closureWakeCount ?? 0;
+      if (wakeCount < maxClosureWakeRetries) {
+        const retrying = {
+          ...binding,
+          closureWakeCount: wakeCount + 1,
+          updatedAt: Date.now(),
+        };
+        await this.bindings.save(retrying);
+        this.wakeRequester(retrying, "ok", detail.version);
+        this.watchOwnerClosure(retrying);
+        return;
+      }
+      await this.client.fail(binding.executionId, {
+        expectedVersion: detail.version,
+        errorCode: "INTERNAL",
+        retryable: true,
+      });
+      await this.bindings.save({
+        ...binding,
+        status: "ENDED_ERROR",
+        outcome: "owner_closure_failed",
+        updatedAt: Date.now(),
+      });
+      this.markTerminal(binding);
+    } catch (error) {
+      this.logger.warn(
+        `FlowOS Execution owner closure sync deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+      );
+      this.watchOwnerClosure(binding);
     }
   }
 
@@ -248,7 +345,7 @@ export class FlowosExecutionRuntime {
       `[FlowOS Execution]\nexecutionId=${binding.executionId}\nattemptId=${binding.attemptId}\n` +
       `outcome=${outcome}\nversion=${version}\n` +
       (outcome === "ok"
-        ? "The child run ended successfully. Continue the business validator and register the result before completing the Execution."
+        ? "The child run ended successfully. You must now run the business validator and call flowos_execution_complete, or call flowos_execution_fail. Do not finish this turn while the Execution is active."
         : "The child run ended unsuccessfully. Report the controlled failure; do not complete the Execution.");
     const queued = this.system.enqueueSystemEvent(event, {
       sessionKey: binding.requesterSessionKey,
@@ -262,5 +359,60 @@ export class FlowosExecutionRuntime {
         sessionKey: binding.requesterSessionKey,
       });
     }
+  }
+
+  private watchOwnerClosure(binding: RunBinding): void {
+    const key = this.bindingKey(binding);
+    this.scheduleGuard(this.closureGuards, key, closureGuardMs, async () => {
+      await this.locks.run(binding.executionId, binding.attemptId, async () => {
+        const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+        if (current?.status.endsWith("_PENDING_SYNC")) {
+          const version = await this.syncTerminalLocked(current);
+          if (version !== null) {
+            this.wakeRequester(current, current.outcome ?? "error", version);
+            if (current.outcome === "ok") {
+              this.watchOwnerClosure(current);
+            }
+          }
+          return;
+        }
+        if (current?.status === "ENDED_OK") {
+          await this.syncOwnerClosureLocked(current);
+        }
+      });
+    });
+  }
+
+  private scheduleGuard(
+    guards: Map<string, NodeJS.Timeout>,
+    key: string,
+    delayMs: number,
+    task: () => Promise<void>,
+  ): void {
+    if (guards.has(key)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      guards.delete(key);
+      void task().catch((error) => {
+        this.logger.warn(
+          `FlowOS Execution guard failed for ${key}: ${error instanceof Error ? error.message : "error"}`,
+        );
+      });
+    }, delayMs);
+    timer.unref();
+    guards.set(key, timer);
+  }
+
+  private clearGuard(guards: Map<string, NodeJS.Timeout>, key: string): void {
+    const timer = guards.get(key);
+    if (timer) {
+      clearTimeout(timer);
+      guards.delete(key);
+    }
+  }
+
+  private bindingKey(binding: Pick<RunBinding, "executionId" | "attemptId">): string {
+    return `${binding.executionId}:${binding.attemptId}`;
   }
 }
