@@ -1347,6 +1347,7 @@ function resolveRemainingSystemEventWake(events: readonly SystemEvent[]):
       source: "exec-event" | "cron" | "background-task";
       intent: "event" | "immediate";
       reason: string;
+      heartbeat?: { target: "last" };
     }
   | undefined {
   if (events.some((event) => isExecCompletionEvent(event.text))) {
@@ -1358,6 +1359,7 @@ function resolveRemainingSystemEventWake(events: readonly SystemEvent[]):
       source: "cron",
       intent: "event",
       reason: cronEvent.contextKey,
+      heartbeat: { target: "last" },
     };
   }
   if (events.some(isBackgroundTaskPayloadEvent)) {
@@ -1769,7 +1771,6 @@ export async function runHeartbeatOnce(opts: {
       agentId,
       sessionKey,
       coalesceMs: 0,
-      ...(opts.heartbeat ? { heartbeat: opts.heartbeat } : {}),
     });
   };
 
