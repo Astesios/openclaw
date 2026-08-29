@@ -174,6 +174,17 @@ export class FlowosExecutionRuntime {
     this.clearGuard(this.closureGuards, key);
   }
 
+  async markOwnerFailed(binding: RunBinding): Promise<void> {
+    const failed: RunBinding = {
+      ...binding,
+      status: "ENDED_ERROR",
+      outcome: "owner_failed",
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(failed);
+    this.markTerminal(failed);
+  }
+
   async prepareAndCompleteResult(
     binding: RunBinding,
     params: {

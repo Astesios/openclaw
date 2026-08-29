@@ -63,6 +63,71 @@ function memoryStore<T>(): PluginStateKeyedStore<T> {
   };
 }
 
+function ttlAwareMemoryStore<T>() {
+  let now = 0;
+  const values = new Map<string, { value: T; createdAt: number; expiresAt?: number }>();
+  const prune = () => {
+    for (const [key, entry] of values) {
+      if (entry.expiresAt !== undefined && entry.expiresAt <= now) {
+        values.delete(key);
+      }
+    }
+  };
+  const store: PluginStateKeyedStore<T> = {
+    async register(key, value, opts) {
+      values.set(key, {
+        value,
+        createdAt: now,
+        ...(opts?.ttlMs ? { expiresAt: now + opts.ttlMs } : {}),
+      });
+    },
+    async registerIfAbsent(key, value, opts) {
+      prune();
+      if (values.has(key)) {
+        return false;
+      }
+      await store.register(key, value, opts);
+      return true;
+    },
+    async update(key, updateValue, opts) {
+      prune();
+      const next = updateValue(values.get(key)?.value);
+      if (next === undefined) {
+        values.delete(key);
+      } else {
+        await store.register(key, next, opts);
+      }
+      return true;
+    },
+    async lookup(key) {
+      prune();
+      return values.get(key)?.value;
+    },
+    async consume(key) {
+      prune();
+      const value = values.get(key)?.value;
+      values.delete(key);
+      return value;
+    },
+    async delete(key) {
+      return values.delete(key);
+    },
+    async entries() {
+      prune();
+      return [...values.entries()].map(([key, entry]) => Object.assign({ key }, entry));
+    },
+    async clear() {
+      values.clear();
+    },
+  };
+  return {
+    store,
+    advance(ms: number) {
+      now += ms;
+    },
+  };
+}
+
 function fakeClient(options?: {
   beforeRequest?: (
     method: "GET" | "POST",
@@ -262,6 +327,58 @@ async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
 }
 
 describe("FlowOS Execution plugin boundaries", () => {
+  it("keeps pending result delivery beyond terminal TTL and expires only after delivery", async () => {
+    const clock = ttlAwareMemoryStore<RunBinding>();
+    const bindings = new RunBindingStore(clock.store);
+    const base: RunBinding = {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      requesterSessionKey: "agent:main:main",
+      ownerAgentId: "agent:main",
+      targetAgentId: "worker",
+      childSessionKey: "agent:worker:subagent:flowos-1",
+      runId: "run-1",
+      status: "ENDED_OK",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const pending = {
+      expectedVersion: 2,
+      resultRef: { type: "SPACE_ARTIFACT" as const, id: "art-1", spaceId: "sp-trip" },
+      card: {
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        caption: "路书做好啦，点开看看～",
+      },
+    };
+
+    await bindings.save(base);
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "PREPARED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "EXECUTION_COMPLETED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeDefined();
+
+    await bindings.save({
+      ...base,
+      resultDelivery: { ...pending, status: "DELIVERED" },
+    });
+    clock.advance(7 * 60 * 60_000);
+    expect(await bindings.byExecution("execution-1", "attempt-1")).toBeUndefined();
+  });
+
   it("persists one deterministic requester result card before completion", async () => {
     const inject = vi.fn(async () => ({ ok: true, messageId: "message-1" }));
     const params = {

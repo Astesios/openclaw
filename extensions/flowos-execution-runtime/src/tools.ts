@@ -498,7 +498,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           errorCode: params.errorCode,
           retryable: params.retryable ?? false,
         });
-        deps.runtime.markTerminal(binding);
+        await deps.runtime.markOwnerFailed(binding);
         return jsonResult(item);
       });
     },

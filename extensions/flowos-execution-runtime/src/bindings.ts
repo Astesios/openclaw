@@ -41,8 +41,16 @@ export type RunBinding = {
 
 const terminalBindingTtlMs = 6 * 60 * 60 * 1_000;
 
-function isTerminalBinding(status: RunBindingStatus): boolean {
-  return status === "ENDED_OK" || status === "ENDED_ERROR" || status === "SPAWN_FAILED";
+function isExpirableBinding(binding: RunBinding): boolean {
+  if (binding.status === "ENDED_ERROR" || binding.status === "SPAWN_FAILED") {
+    return true;
+  }
+  if (binding.status !== "ENDED_OK") {
+    return false;
+  }
+  return (
+    binding.resultDelivery?.status === "DELIVERED" || binding.resultDelivery?.status === "ABORTED"
+  );
 }
 
 export class RunBindingStore {
@@ -66,7 +74,7 @@ export class RunBindingStore {
     await this.store.register(
       this.executionKey(binding.executionId, binding.attemptId),
       binding,
-      isTerminalBinding(binding.status) ? { ttlMs: terminalBindingTtlMs } : undefined,
+      isExpirableBinding(binding) ? { ttlMs: terminalBindingTtlMs } : undefined,
     );
   }
 
