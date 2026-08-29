@@ -191,7 +191,14 @@ function fakeClient(options?: {
     await options?.afterRequest?.(method, path, payload);
     return item;
   });
-  return { client: new FlowosExecutionClient(request), calls, getItem: () => item };
+  return {
+    client: new FlowosExecutionClient(request),
+    calls,
+    getItem: () => item,
+    setItem: (next: Partial<ActiveExecution>) => {
+      item = { ...item, ...next };
+    },
+  };
 }
 
 function fakeSubagent() {
@@ -902,11 +909,18 @@ describe("FlowOS Execution plugin boundaries", () => {
     }
   });
 
-  it("never delivers a success card when Assist complete fails", async () => {
+  it("freezes owner stage and fails the same Attempt after prepared version drift", async () => {
+    let loseFailResponse = true;
     const assist = fakeClient({
       beforeRequest(_method, path) {
         if (path.endsWith("/complete")) {
           throw new Error("Assist complete unavailable");
+        }
+      },
+      afterRequest(_method, path) {
+        if (loseFailResponse && path.endsWith("/fail")) {
+          loseFailResponse = false;
+          throw new Error("fail response lost");
         }
       },
     });
@@ -936,15 +950,81 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
       resultDelivery: { status: "PREPARED" },
     });
-    await assist.client.fail("execution-1", {
+    await expect(
+      owner.byName.get("flowos_execution_stage")?.execute("late-owner-stage", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        stageKey: "late",
+        stageLabel: "迟到阶段",
+      }),
+    ).rejects.toThrow("stage is frozen after result preparation");
+    await assist.client.stage("execution-1", {
       expectedVersion: 2,
-      errorCode: "CANCELLED_BY_USER",
-      retryable: false,
+      stageKey: "external-drift",
+      stageLabel: "外部版本漂移",
+    });
+    await owner.runtime.reconcile();
+    expect(assist.getItem()).toMatchObject({ status: "FAILED", version: 4 });
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      resultDelivery: { status: "PREPARED" },
     });
     await owner.runtime.reconcile();
     expect(deliverResultCard).not.toHaveBeenCalled();
     expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
       status: "ENDED_ERROR",
+      outcome: "result_delivery_aborted",
+      resultDelivery: { status: "ABORTED" },
+    });
+  });
+
+  it("aborts only the old delivery when Assist switches to a new Attempt", async () => {
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (path.endsWith("/complete")) {
+          throw new Error("Assist complete unavailable");
+        }
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>();
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "旅行路书",
+        artifactFilePath: "generated/lushu.html",
+        artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
+      }),
+    ).rejects.toThrow("Assist complete unavailable");
+    assist.setItem({
+      currentAttemptId: "attempt-2",
+      status: "RUNNING",
+      version: 3,
+      stageKey: "retrying",
+    });
+
+    await owner.runtime.reconcile();
+    expect(assist.getItem()).toMatchObject({
+      currentAttemptId: "attempt-2",
+      status: "RUNNING",
+      version: 3,
+    });
+    expect(assist.calls.filter((call) => call.path.endsWith("/fail"))).toHaveLength(0);
+    expect(deliverResultCard).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "ENDED_ERROR",
+      outcome: "result_attempt_replaced",
       resultDelivery: { status: "ABORTED" },
     });
   });

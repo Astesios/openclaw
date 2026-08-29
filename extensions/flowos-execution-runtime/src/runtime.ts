@@ -207,7 +207,7 @@ export class FlowosExecutionRuntime {
     try {
       return await this.syncResultDeliveryLocked(prepared);
     } catch (error) {
-      this.watchOwnerClosure(prepared);
+      await this.watchResultDeliveryIfPending(prepared);
       throw error;
     }
   }
@@ -411,7 +411,7 @@ export class FlowosExecutionRuntime {
         this.logger.warn(
           `FlowOS Execution result delivery deferred for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
         );
-        this.watchOwnerClosure(binding);
+        await this.watchResultDeliveryIfPending(binding);
       }
       return;
     }
@@ -465,11 +465,18 @@ export class FlowosExecutionRuntime {
       return detail;
     }
     if (activeStatuses.has(detail.status)) {
-      if (
-        detail.currentAttemptId !== binding.attemptId ||
-        detail.version !== delivery.expectedVersion
-      ) {
-        throw new Error("FlowOS Execution changed after result preparation");
+      if (detail.currentAttemptId !== binding.attemptId) {
+        await this.abortResultDelivery(binding, delivery, "result_attempt_replaced");
+        throw new Error("FlowOS Execution Attempt changed after result preparation");
+      }
+      if (detail.version !== delivery.expectedVersion) {
+        await this.client.fail(binding.executionId, {
+          expectedVersion: detail.version,
+          errorCode: "CONFLICT",
+          retryable: false,
+        });
+        await this.abortResultDelivery(binding, delivery, "result_version_conflict");
+        throw new Error("FlowOS Execution version changed after result preparation");
       }
       detail = await this.client.complete({
         executionId: binding.executionId,
@@ -478,15 +485,7 @@ export class FlowosExecutionRuntime {
       });
     }
     if (detail.status !== "SUCCEEDED" || !sameResultRef(detail.resultRef, delivery.resultRef)) {
-      const aborted: RunBinding = {
-        ...binding,
-        status: "ENDED_ERROR",
-        outcome: "result_delivery_aborted",
-        resultDelivery: { ...delivery, status: "ABORTED" },
-        updatedAt: Date.now(),
-      };
-      await this.bindings.save(aborted);
-      this.markTerminal(aborted);
+      await this.abortResultDelivery(binding, delivery, "result_delivery_aborted");
       throw new Error("FlowOS Execution did not complete with the prepared result");
     }
 
@@ -510,6 +509,32 @@ export class FlowosExecutionRuntime {
     await this.bindings.save(delivered);
     this.markTerminal(delivered);
     return detail;
+  }
+
+  private async abortResultDelivery(
+    binding: RunBinding,
+    delivery: ResultDelivery,
+    outcome: string,
+  ): Promise<void> {
+    const aborted: RunBinding = {
+      ...binding,
+      status: "ENDED_ERROR",
+      outcome,
+      resultDelivery: { ...delivery, status: "ABORTED" },
+      updatedAt: Date.now(),
+    };
+    await this.bindings.save(aborted);
+    this.markTerminal(aborted);
+  }
+
+  private async watchResultDeliveryIfPending(binding: RunBinding): Promise<void> {
+    const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+    if (
+      current?.resultDelivery?.status === "PREPARED" ||
+      current?.resultDelivery?.status === "EXECUTION_COMPLETED"
+    ) {
+      this.watchOwnerClosure(current);
+    }
   }
 
   private wakeRequester(binding: RunBinding, outcome: string, version: number): void {

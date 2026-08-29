@@ -276,6 +276,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         ) {
           throw new Error("child progress capability is no longer active");
         }
+        if (
+          latestBinding.resultDelivery?.status === "PREPARED" ||
+          latestBinding.resultDelivery?.status === "EXECUTION_COMPLETED"
+        ) {
+          throw new Error("FlowOS Execution stage is frozen after result preparation");
+        }
         const item = await deps.client.stage(params.executionId, {
           expectedVersion: current.version,
           stageKey: params.stageKey,
