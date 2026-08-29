@@ -343,6 +343,16 @@ async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
   });
 }
 
+async function startRoutebookExecution(byName: Map<string, AnyAgentTool>) {
+  await byName.get("flowos_execution_start")?.execute("start", {
+    source: "SPACE_TASK",
+    taskKind: "ROUTEBOOK_GENERATION",
+    title: "生成路书",
+    idempotencyKey: "request-routebook-1",
+    spaceId: "sp-trip",
+  });
+}
+
 const routebookResultPlan = {
   spaceId: "sp-trip",
   artifactTitle: "蚌埠路书",
@@ -731,6 +741,26 @@ describe("FlowOS Execution plugin boundaries", () => {
     const schema = JSON.stringify(owner.byName.get("flowos_execution_spawn")?.parameters);
     expect(schema).toContain("resultPlan");
     expect(schema).not.toContain("workspaceDir");
+  });
+
+  it("fails fast instead of silently falling back when a routebook omits resultPlan", async () => {
+    const owner = tools();
+    await startRoutebookExecution(owner.byName);
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      taskKind: "ROUTEBOOK_GENERATION",
+    });
+    await expect(
+      owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        agentId: "worker",
+        task: "generate a routebook",
+      }),
+    ).rejects.toThrow("ROUTEBOOK_GENERATION spawn requires resultPlan");
+    expect(owner.subagent.run).not.toHaveBeenCalled();
+    const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
+    expect(binding).toMatchObject({ status: "CREATED" });
+    expect(binding?.targetAgentId).toBeUndefined();
   });
 
   it("finalizes a planned routebook without waking the requester model", async () => {

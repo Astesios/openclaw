@@ -43,6 +43,7 @@ export type RunBinding = {
   attemptId: string;
   requesterSessionKey: string;
   ownerAgentId: string;
+  taskKind?: string;
   targetAgentId?: string;
   childSessionKey?: string;
   runId?: string;

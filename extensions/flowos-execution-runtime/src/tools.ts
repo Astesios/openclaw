@@ -19,6 +19,7 @@ import { FlowosExecutionRuntime } from "./runtime.js";
 import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
+const plannedRoutebookTaskKind = "ROUTEBOOK_GENERATION";
 const errorCodes = [
   "AUTHORIZATION_DENIED",
   "GRANT_EXPIRED",
@@ -179,6 +180,7 @@ function executionBinding(params: {
   attemptId: string;
   requesterSessionKey: string;
   ownerAgentId: string;
+  taskKind: string;
 }): RunBinding {
   const now = Date.now();
   return {
@@ -253,6 +255,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             attemptId,
             requesterSessionKey,
             ownerAgentId: deps.ownerAgentId,
+            taskKind: params.taskKind,
           });
           await deps.bindings.save(binding);
         }
@@ -368,6 +371,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(current, requesterSessionKey, deps.ownerAgentId);
+        if (current.taskKind === plannedRoutebookTaskKind && !finalizationPlan) {
+          throw new Error(
+            "ROUTEBOOK_GENERATION spawn requires resultPlan with spaceId, artifactTitle, artifactFilePath, artifactType, and cardCaption",
+          );
+        }
         if (current.targetAgentId) {
           if (current.targetAgentId !== params.agentId) {
             throw new Error("FlowOS Execution Attempt is already assigned to another agent");
