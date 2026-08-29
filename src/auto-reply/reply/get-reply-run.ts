@@ -89,7 +89,6 @@ import { resolveOriginMessageProvider } from "./origin-routing.js";
 import { buildReplyPromptEnvelope, buildReplyPromptEnvelopeBase } from "./prompt-prelude.js";
 import { resolveActiveRunQueueAction } from "./queue-policy.js";
 import { resolveQueueSettings } from "./queue/settings-runtime.js";
-import { heartbeatOwnsSystemEvents } from "./reply-operation-run-state.js";
 import {
   REPLY_RUN_IDLE_SETTLE_TIMEOUT_MS,
   abortReplyRunBySessionId,
@@ -817,7 +816,6 @@ export async function runPreparedReply(
       ? `[Thread starter - for context]\n${threadStarterBody}`
       : undefined;
   const drainedSystemEventBlocks: string[] = [];
-  const skipSystemEventDrain = heartbeatOwnsSystemEvents(opts);
   const rebuildPromptBodies = async (): Promise<{
     prefixedCommandBody: string;
     queuedBody: string;
@@ -825,7 +823,7 @@ export async function runPreparedReply(
     transcriptCommandBody: string;
     currentInboundContext?: typeof promptEnvelopeBase.currentInboundContext;
   }> => {
-    if (!useFastReplyRuntime && !skipSystemEventDrain) {
+    if (!useFastReplyRuntime) {
       const eventsBlock = await drainFormattedSystemEvents({
         cfg,
         sessionKey,

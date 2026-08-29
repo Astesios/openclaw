@@ -9,11 +9,6 @@ import {
   setActiveEmbeddedRun,
 } from "../../agents/embedded-agent-runner/runs.js";
 import type { SessionEntry } from "../../config/sessions.js";
-import type { GetReplyOptions } from "../get-reply-options.types.js";
-import {
-  HEARTBEAT_OWNS_SYSTEM_EVENTS,
-  type ReplyOptionsWithOperationRunState,
-} from "./reply-operation-run-state.js";
 import { createReplyOperation } from "./reply-run-registry.js";
 
 vi.mock("../../agents/auth-profiles/session-override.js", () => ({
@@ -2380,44 +2375,6 @@ describe("runPreparedReply media-only handling", () => {
     expect(call?.followupRun.prompt).toContain(heartbeatPrompt);
     expect(call?.transcriptCommandBody).toBe("[OpenClaw heartbeat poll]");
     expect(call?.followupRun.transcriptPrompt).toBe("[OpenClaw heartbeat poll]");
-  });
-
-  it("does not drain heartbeat-owned background events before reply admission", async () => {
-    const completionPrompt =
-      "A background task state change is ready. [FlowOS Execution] validate and complete it.";
-    const replyOptions: GetReplyOptions & ReplyOptionsWithOperationRunState = {
-      isHeartbeat: true,
-      [HEARTBEAT_OWNS_SYSTEM_EVENTS]: true,
-    };
-    vi.mocked(drainFormattedSystemEvents).mockResolvedValueOnce(
-      "System: this event must remain runner-owned",
-    );
-
-    await runPreparedReply(
-      baseParams({
-        opts: replyOptions,
-        ctx: {
-          Body: completionPrompt,
-          RawBody: completionPrompt,
-          CommandBody: completionPrompt,
-          Provider: "heartbeat",
-          Surface: "heartbeat",
-          ChatType: "direct",
-        },
-        sessionCtx: {
-          Body: completionPrompt,
-          BodyStripped: completionPrompt,
-          Provider: "heartbeat",
-          Surface: "heartbeat",
-          ChatType: "direct",
-        },
-      }),
-    );
-
-    expect(drainFormattedSystemEvents).not.toHaveBeenCalled();
-    const call = requireLastRunReplyAgentCall();
-    expect(call?.commandBody).toContain(completionPrompt);
-    expect(call?.commandBody).not.toContain("this event must remain runner-owned");
   });
 
   it("uses persisted Discord chat metadata for system-event CLI static prompt identity", async () => {
