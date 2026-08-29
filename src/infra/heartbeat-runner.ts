@@ -968,10 +968,14 @@ function resolveHeartbeatWakePayloadFlags(params: {
 }): HeartbeatWakePayloadFlags {
   const source = params.source ?? inferHeartbeatWakeSourceFromReason(params.reason);
   const reason = (params.reason ?? "").trim();
+  // Task registry and runtime plugins enqueue a session event before these wakes.
+  // Treat them like hook wakes so a non-due HEARTBEAT.md task cannot hide the payload.
+  const isBackgroundTaskWake = source === "background-task" || source === "background-task-blocked";
   return {
     isExecEventWake: source === "exec-event",
     isCronWake: source === "cron",
-    isWakePayload: source === "hook" || source === "acp-spawn" || reason === "wake",
+    isWakePayload:
+      source === "hook" || source === "acp-spawn" || isBackgroundTaskWake || reason === "wake",
   };
 }
 

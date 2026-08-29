@@ -247,6 +247,54 @@ describe("Ghost reminder bug (issue #13317)", () => {
     expect(sendTelegram).toHaveBeenCalled();
   });
 
+  it.each(["background-task", "background-task-blocked"] as const)(
+    "%s wake bypasses non-due periodic tasks and delivers its queued session event",
+    async (source) => {
+      await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+        const cfg = createLastTargetConfig({ tmpDir, storePath });
+        const sessionKey = resolveMainSessionKey(cfg);
+        const now = Date.now();
+        await fs.writeFile(
+          `${tmpDir}/HEARTBEAT.md`,
+          `tasks:\n  - name: context-recommender\n    interval: 1h\n    prompt: refresh suggestions\n`,
+        );
+        await writeTelegramSessionStore(storePath, sessionKey, {
+          lastTo: "-100155462274",
+          heartbeatTaskState: { "context-recommender": now },
+        });
+
+        const completionEvent =
+          "[FlowOS Execution] child completed; validate the artifact and complete the Execution";
+        enqueueSystemEvent(completionEvent, {
+          sessionKey,
+          contextKey: "flowos-execution:execution-1:attempt-1:ended",
+        });
+        replySpy.mockResolvedValue({ text: "Handled the completion event" });
+        const sendTelegram = vi.fn().mockResolvedValue({
+          messageId: "m1",
+          chatId: "-100155462274",
+        });
+
+        const result = await runHeartbeatOnce({
+          cfg,
+          agentId: "main",
+          sessionKey,
+          source,
+          intent: "immediate",
+          reason: source,
+          deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
+        });
+
+        expect(result.status).toBe("ran");
+        expect(replySpy).toHaveBeenCalledTimes(1);
+        const replyContext = getFirstReplyContext(replySpy);
+        expect(replyContext.Body).toContain("Read HEARTBEAT.md");
+        expect(replyContext.Body).not.toContain("refresh suggestions");
+        expect(peekSystemEvents(sessionKey)).toEqual([]);
+      });
+    },
+  );
+
   it("uses CRON_EVENT_PROMPT when an actionable cron event exists", async () => {
     const { result, sendTelegram, calledCtx } = await runCronReminderCase(
       "openclaw-cron-",
