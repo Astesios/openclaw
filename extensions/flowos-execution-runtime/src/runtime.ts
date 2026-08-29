@@ -120,17 +120,22 @@ export class FlowosExecutionRuntime {
   watchOwnerSpawn(binding: RunBinding): void {
     const key = this.bindingKey(binding);
     this.scheduleGuard(this.spawnGuards, key, spawnGuardMs, async () => {
+      const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+      if (current?.status === "STARTING") {
+        await this.reconcileStarting(current);
+        return;
+      }
       await this.locks.run(binding.executionId, binding.attemptId, async () => {
-        const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
-        if (current?.status === "SPAWN_FAILED_PENDING_SYNC") {
-          await this.syncSpawnFailureLocked(current);
+        const locked = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+        if (locked?.status === "SPAWN_FAILED_PENDING_SYNC") {
+          await this.syncSpawnFailureLocked(locked);
           return;
         }
-        if (current?.status !== "CREATED" && current?.status !== "STARTING") {
+        if (locked?.status !== "CREATED") {
           return;
         }
         const pending: RunBinding = {
-          ...current,
+          ...locked,
           status: "SPAWN_FAILED_PENDING_SYNC",
           updatedAt: Date.now(),
         };
@@ -153,19 +158,9 @@ export class FlowosExecutionRuntime {
   async reconcile(): Promise<void> {
     for (const binding of await this.bindings.canonicalEntries()) {
       if (binding.status === "CREATED" || binding.status === "STARTING") {
-        await this.locks.run(binding.executionId, binding.attemptId, async () => {
-          const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
-          if (current?.status !== "CREATED" && current?.status !== "STARTING") {
-            return;
-          }
-          const pending: RunBinding = {
-            ...current,
-            status: "SPAWN_FAILED_PENDING_SYNC",
-            updatedAt: Date.now(),
-          };
-          await this.bindings.save(pending);
-          await this.syncSpawnFailureLocked(pending);
-        });
+        // Registry restoration and plugin gateway_start can race. The bounded
+        // guard queries the durable run record after startup settles.
+        this.watchOwnerSpawn(binding);
         continue;
       }
       if (binding.status === "ENDED_OK") {
@@ -262,6 +257,55 @@ export class FlowosExecutionRuntime {
       );
       this.watchOwnerSpawn(binding);
     }
+  }
+
+  private async reconcileStarting(binding: RunBinding): Promise<void> {
+    const runStatus = await this.subagent.getRunStatus({
+      runId: binding.runId ?? "",
+      sessionKey: binding.childSessionKey ?? "",
+    });
+    if (runStatus.status === "missing") {
+      await this.locks.run(binding.executionId, binding.attemptId, async () => {
+        const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+        if (current?.status !== "STARTING") {
+          return;
+        }
+        const pending = {
+          ...current,
+          status: "SPAWN_FAILED_PENDING_SYNC" as const,
+          updatedAt: Date.now(),
+        };
+        await this.bindings.save(pending);
+        await this.syncSpawnFailureLocked(pending);
+      });
+      return;
+    }
+
+    let recovered: RunBinding | undefined;
+    await this.locks.run(binding.executionId, binding.attemptId, async () => {
+      const current = await this.bindings.byExecution(binding.executionId, binding.attemptId);
+      if (current?.status !== "STARTING") {
+        return;
+      }
+      recovered = { ...current, status: "RUNNING", updatedAt: Date.now() };
+      await this.bindings.save(recovered);
+      this.markSpawnAccepted(recovered);
+    });
+    if (!recovered || runStatus.status !== "ended") {
+      return;
+    }
+    await this.subagentEnded(
+      {
+        targetSessionKey: recovered.childSessionKey ?? "",
+        targetKind: "subagent",
+        runId: recovered.runId,
+        outcome: runStatus.outcome,
+      },
+      {
+        childSessionKey: recovered.childSessionKey,
+        requesterSessionKey: recovered.requesterSessionKey,
+      },
+    );
   }
 
   private async syncTerminalLocked(binding: RunBinding): Promise<number | null> {

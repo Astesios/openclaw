@@ -40,6 +40,15 @@ type ToolDeps = {
     filePath: string;
     artifactType: "html" | "markdown";
   }) => Promise<SpaceArtifactValidation>;
+  deliverResultCard: (params: {
+    sessionKey: string;
+    executionId: string;
+    attemptId: string;
+    spaceId: string;
+    artifactTitle: string;
+    artifactFilePath: string;
+    caption: string;
+  }) => Promise<void>;
 };
 
 function requireSession(context: OpenClawPluginToolContext): string {
@@ -391,7 +400,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
     name: "flowos_execution_complete",
     label: "FlowOS Execution Complete",
     description:
-      "Register one validated generated Space Artifact and complete the owner Execution.",
+      "Register one validated Space Artifact, persist its requester card, then complete the owner Execution.",
     executionMode: "sequential",
     parameters: Type.Object(
       {
@@ -402,6 +411,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         artifactTitle: Type.String({ minLength: 1, maxLength: 160 }),
         artifactFilePath: Type.String({ minLength: 1, maxLength: 512 }),
         artifactType: Type.Union([Type.Literal("html"), Type.Literal("markdown")]),
+        cardCaption: Type.String({ minLength: 1, maxLength: 500 }),
       },
       { additionalProperties: false },
     ),
@@ -414,6 +424,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         artifactTitle: string;
         artifactFilePath: string;
         artifactType: "html" | "markdown";
+        cardCaption: string;
       };
       return await deps.locks.run(params.executionId, params.attemptId, async () => {
         const sessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
@@ -444,6 +455,15 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           filePath: params.artifactFilePath,
           artifactType: params.artifactType,
           ...validation,
+        });
+        await deps.deliverResultCard({
+          sessionKey,
+          executionId: params.executionId,
+          attemptId: params.attemptId,
+          spaceId: params.spaceId,
+          artifactTitle: params.artifactTitle,
+          artifactFilePath: params.artifactFilePath,
+          caption: params.cardCaption,
         });
         const item = await deps.client.complete({
           executionId: params.executionId,

@@ -10,6 +10,7 @@ import {
 import type { ErrorShape } from "../../packages/gateway-protocol/src/index.js";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.js";
 import { normalizeModelRef, parseModelRef } from "../agents/model-selection.js";
+import { getSubagentRunByChildSessionKey } from "../agents/subagent-registry-read.js";
 import { applyPluginAutoEnable } from "../config/plugin-auto-enable.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
@@ -624,6 +625,20 @@ export function createGatewaySubagentRuntime(): PluginRuntime["subagent"] {
       return {
         status,
         ...(typeof payload?.error === "string" && payload.error && { error: payload.error }),
+      };
+    },
+    async getRunStatus(params) {
+      const entry = getSubagentRunByChildSessionKey(params.sessionKey);
+      if (!entry || entry.runId !== params.runId) {
+        return { status: "missing" };
+      }
+      if (typeof entry.endedAt !== "number" && entry.execution?.status !== "terminal") {
+        return { status: "running" };
+      }
+      const outcome = entry.outcome?.status;
+      return {
+        status: "ended",
+        outcome: outcome === "ok" || outcome === "timeout" ? outcome : "error",
       };
     },
     getSessionMessages,

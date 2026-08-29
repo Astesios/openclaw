@@ -110,6 +110,10 @@ describe("Dockerfile", () => {
     const workflow = await readFile(floaiImageWorkflowPath, "utf8");
     expect(workflow).toContain("OPENCLAW_EXTENSIONS=qwen,perplexity");
     expect(workflow).toContain("OPENCLAW_IMAGE_NPM_PACKAGES=@fly-ai/flyai-cli@1.0.16");
+    expect(workflow).toContain("JCR push 失败（${n}/3）");
+    expect(workflow).toContain("return 1");
+    expect(workflow).toContain("docker buildx imagetools inspect");
+    expect(workflow).toContain("JCR digest 不匹配");
   });
 
   it("uses the Docker target platform for pnpm install and prune", async () => {

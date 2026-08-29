@@ -130,8 +130,26 @@ jobs:
           push() {  # $1=GHCR digest  $2=JCR tag
             docker pull "${IMAGE}@$1"
             docker tag  "${IMAGE}@$1" "${JCR_IMG}:$2"
-            for n in 1 2 3; do docker push "${JCR_IMG}:$2" && break; echo "重试 $n…"; sleep 8; done
+            for n in 1 2 3; do
+              if docker push "${JCR_IMG}:$2"; then
+                return 0
+              fi
+              echo "JCR push 失败（${n}/3）" >&2
+              [ "$n" -eq 3 ] || sleep 8
+            done
+            return 1
           }
-          push "$(cat amd64)" "${TAG}"
-          push "$(cat arm64)" "${TAG}-arm64"
+          verify() {  # $1=expected digest  $2=JCR tag
+            actual="$(docker buildx imagetools inspect "${JCR_IMG}:$2" --format '{{.Manifest.Digest}}')"
+            [ "$actual" = "$1" ] || {
+              echo "JCR digest 不匹配: tag=$2 expected=$1 actual=$actual" >&2
+              return 1
+            }
+          }
+          AMD64_DIGEST="$(cat amd64)"
+          ARM64_DIGEST="$(cat arm64)"
+          push "$AMD64_DIGEST" "${TAG}"
+          push "$ARM64_DIGEST" "${TAG}-arm64"
+          verify "$AMD64_DIGEST" "${TAG}"
+          verify "$ARM64_DIGEST" "${TAG}-arm64"
           echo "✓ JCR: ${JCR_IMG}:${TAG}(amd64) + ${JCR_IMG}:${TAG}-arm64(arm64)"

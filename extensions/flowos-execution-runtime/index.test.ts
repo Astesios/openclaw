@@ -2,7 +2,7 @@ import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import plugin, { deriveExecutionRuntimeToken } from "./index.js";
+import plugin, { deliverExecutionResultCard, deriveExecutionRuntimeToken } from "./index.js";
 import { RunBindingStore, type RunBinding } from "./src/bindings.js";
 import {
   type ActiveExecution,
@@ -125,6 +125,9 @@ function fakeSubagent() {
     waitForRun: vi.fn<PluginRuntime["subagent"]["waitForRun"]>(async () => ({
       status: "timeout",
     })),
+    getRunStatus: vi.fn<PluginRuntime["subagent"]["getRunStatus"]>(async () => ({
+      status: "missing",
+    })),
     getSessionMessages: vi.fn<PluginRuntime["subagent"]["getSessionMessages"]>(async () => ({
       messages: [],
     })),
@@ -146,6 +149,16 @@ type ArtifactValidator = (params: {
   artifactType: "html" | "markdown";
 }) => Promise<SpaceArtifactValidation>;
 
+type ResultCardDelivery = (params: {
+  sessionKey: string;
+  executionId: string;
+  attemptId: string;
+  spaceId: string;
+  artifactTitle: string;
+  artifactFilePath: string;
+  caption: string;
+}) => Promise<void>;
+
 function tools(params?: {
   context?: { agentId?: string; sessionKey?: string };
   client?: FlowosExecutionClient;
@@ -155,6 +168,7 @@ function tools(params?: {
   locks?: ExecutionLocks;
   runtime?: FlowosExecutionRuntime;
   validateArtifact?: ArtifactValidator;
+  deliverResultCard?: ResultCardDelivery;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
@@ -177,6 +191,7 @@ function tools(params?: {
       validatorId: "lushu-html-v1" as const,
       contentSha256: "a".repeat(64),
     }));
+  const deliverResultCard = params?.deliverResultCard ?? vi.fn<ResultCardDelivery>();
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
     context: params?.context ?? { agentId: "main", sessionKey: "agent:main:main" },
@@ -186,6 +201,7 @@ function tools(params?: {
     runtime,
     ownerAgentId: "agent:main",
     validateArtifact,
+    deliverResultCard,
   });
   return {
     byName: new Map(created.map((tool) => [tool.name, tool])),
@@ -195,6 +211,7 @@ function tools(params?: {
     locks,
     runtime,
     validateArtifact,
+    deliverResultCard,
   };
 }
 
@@ -233,6 +250,30 @@ async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
 }
 
 describe("FlowOS Execution plugin boundaries", () => {
+  it("persists one deterministic requester result card before completion", async () => {
+    const inject = vi.fn(async () => ({ ok: true, messageId: "message-1" }));
+    const params = {
+      sessionKey: "agent:main:main",
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      caption: "路书做好啦，点开看看～",
+    };
+    await deliverExecutionResultCard(params, inject);
+    await deliverExecutionResultCard(params, inject);
+    expect(inject).toHaveBeenCalledTimes(2);
+    expect(inject).toHaveBeenCalledWith(
+      params.sessionKey,
+      expect.stringContaining(
+        '[celia_card]{"type":"resource_card","resourceType":"file","id":"sp-trip"',
+      ),
+      undefined,
+      { idempotencyKey: "flowos-execution:execution-1:attempt-1:result-card" },
+    );
+  });
+
   it("allows only native loopback and Compose Assist origins", () => {
     expect(resolveTrustedAssistEndpoint(undefined)?.origin).toBe("http://127.0.0.1:18790");
     expect(resolveTrustedAssistEndpoint("http://assist:18790")?.origin).toBe("http://assist:18790");
@@ -455,6 +496,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("owner tool is unavailable");
   });
@@ -572,6 +614,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("has not ended successfully");
   });
@@ -588,6 +631,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         artifactTitle: "旅行路书",
         artifactFilePath: "generated/lushu.html",
         artifactType: "html",
+        cardCaption: "路书做好啦，点开看看～",
       }),
     ).rejects.toThrow("has not ended successfully");
     expect(owner.validateArtifact).not.toHaveBeenCalled();
@@ -626,8 +670,16 @@ describe("FlowOS Execution plugin boundaries", () => {
   });
 
   it("complete registers the bound Space Artifact before completing the owner Execution", async () => {
-    const assist = fakeClient();
-    const owner = tools({ client: assist.client });
+    const events: string[] = [];
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        events.push(path);
+      },
+    });
+    const deliverResultCard = vi.fn<ResultCardDelivery>(async () => {
+      events.push("result-card");
+    });
+    const owner = tools({ client: assist.client, deliverResultCard });
     await startSpaceExecution(owner.byName);
     await markChildEndedOk(owner);
     await assist.client.stage("execution-1", {
@@ -643,10 +695,17 @@ describe("FlowOS Execution plugin boundaries", () => {
       artifactTitle: "旅行路书",
       artifactFilePath: "generated/lushu.html",
       artifactType: "html",
+      cardCaption: "路书做好啦，点开看看～",
     });
     const paths = assist.calls.map((call) => call.path);
     expect(paths.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
       paths.indexOf("/api/executions/execution-1/complete"),
+    );
+    expect(events.indexOf("/api/executions/execution-1/space-artifacts")).toBeLessThan(
+      events.indexOf("result-card"),
+    );
+    expect(events.indexOf("result-card")).toBeLessThan(
+      events.indexOf("/api/executions/execution-1/complete"),
     );
     expect(owner.validateArtifact).toHaveBeenCalledOnce();
     const registration = assist.calls.find((call) => call.path.endsWith("/space-artifacts"));
@@ -654,10 +713,55 @@ describe("FlowOS Execution plugin boundaries", () => {
       validatorId: "lushu-html-v1",
       contentSha256: "a".repeat(64),
     });
+    expect(owner.deliverResultCard).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      caption: "路书做好啦，点开看看～",
+    });
     const schema = JSON.stringify(owner.byName.get("flowos_execution_complete")?.parameters);
+    expect(schema).toContain("cardCaption");
     expect(schema).not.toContain("resultId");
     expect(schema).not.toContain("RESOURCE");
     expect(schema).not.toContain("CASE_DETAIL");
+  });
+
+  it("keeps validating when durable result-card delivery fails and completes on retry", async () => {
+    const assist = fakeClient();
+    const deliverResultCard = vi
+      .fn<ResultCardDelivery>()
+      .mockRejectedValueOnce(new Error("transcript unavailable"))
+      .mockResolvedValue(undefined);
+    const owner = tools({ client: assist.client, deliverResultCard });
+    await startSpaceExecution(owner.byName);
+    await markChildEndedOk(owner);
+    await assist.client.stage("execution-1", {
+      expectedVersion: 1,
+      stageKey: "validating",
+      stageLabel: "正在验证结果",
+    });
+    const input = {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      expectedVersion: 2,
+      spaceId: "sp-trip",
+      artifactTitle: "旅行路书",
+      artifactFilePath: "generated/lushu.html",
+      artifactType: "html" as const,
+      cardCaption: "路书做好啦，点开看看～",
+    };
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("complete-1", input),
+    ).rejects.toThrow("transcript unavailable");
+    expect(assist.getItem()).toMatchObject({ status: "RUNNING", stageKey: "validating" });
+    expect(assist.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);
+
+    await owner.byName.get("flowos_execution_complete")?.execute("complete-2", input);
+    expect(deliverResultCard).toHaveBeenCalledTimes(2);
+    expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
   });
 });
 
@@ -937,32 +1041,67 @@ describe("FlowOS Execution typed hooks", () => {
   });
 
   it("fails closed after restart when a spawn claim was never accepted", async () => {
-    const ctx = runtime();
-    const value = await pending(ctx.bindings);
-    await ctx.instance.reconcile();
-    expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
-      status: "SPAWN_FAILED",
-    });
-    expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
-    expect(ctx.subagent.waitForRun).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+      expect(ctx.subagent.getRunStatus).toHaveBeenCalledWith({
+        runId: value.runId ?? "",
+        sessionKey: value.childSessionKey,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("fails closed after restart when the owner never attempted spawn", async () => {
-    const ctx = runtime();
-    await ctx.bindings.save({
-      executionId: "execution-1",
-      attemptId: "attempt-1",
-      requesterSessionKey: "agent:main:main",
-      ownerAgentId: "agent:main",
-      status: "CREATED",
-      createdAt: 1,
-      updatedAt: 1,
-    });
-    await ctx.instance.reconcile();
-    expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
-      status: "SPAWN_FAILED",
-    });
-    expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      await ctx.bindings.save({
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        requesterSessionKey: "agent:main:main",
+        ownerAgentId: "agent:main",
+        status: "CREATED",
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+        status: "SPAWN_FAILED",
+      });
+      expect(ctx.assist.getItem()).toMatchObject({ status: "FAILED", version: 2 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a durably accepted child when RUNNING checkpoint was not saved", async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = runtime();
+      const value = await pending(ctx.bindings);
+      await ctx.bindings.save({ ...value, runId: "run-1" });
+      ctx.subagent.getRunStatus.mockResolvedValue({ status: "running" });
+      await ctx.instance.reconcile();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await ctx.bindings.byExecution(value.executionId, value.attemptId)).toMatchObject({
+        status: "RUNNING",
+        runId: "run-1",
+      });
+      expect(ctx.assist.calls.some((call) => call.path.endsWith("/fail"))).toBe(false);
+      expect(ctx.subagent.run).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("timeout end maps to a retryable provider timeout failure", async () => {

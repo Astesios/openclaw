@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { lstatSync, readFileSync } from "node:fs";
+import { injectMessageBySessionKey } from "openclaw/plugin-sdk/celia-card-inject";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { RunBindingStore } from "./src/bindings.js";
 import {
@@ -16,6 +17,37 @@ const pluginId = "flowos-execution-runtime";
 const bindingNamespace = "run-bindings";
 const executionRuntimePurpose = "flowos-execution-runtime-v1";
 const standardOwnerAgentId = "agent:main";
+
+type ResultCardParams = {
+  sessionKey: string;
+  executionId: string;
+  attemptId: string;
+  spaceId: string;
+  artifactTitle: string;
+  artifactFilePath: string;
+  caption: string;
+};
+
+export async function deliverExecutionResultCard(
+  params: ResultCardParams,
+  inject: typeof injectMessageBySessionKey = injectMessageBySessionKey,
+): Promise<void> {
+  const cardJson = JSON.stringify({
+    type: "resource_card",
+    resourceType: "file",
+    id: params.spaceId,
+    title: params.artifactTitle,
+    filePath: params.artifactFilePath,
+    action: "create",
+    caption: params.caption,
+  });
+  const delivered = await inject(params.sessionKey, `[celia_card]${cardJson}`, undefined, {
+    idempotencyKey: `flowos-execution:${params.executionId}:${params.attemptId}:result-card`,
+  });
+  if (!delivered.ok) {
+    throw new Error("FlowOS Execution result card delivery is unavailable");
+  }
+}
 
 function loadPrivateSecretFile(filePath: string): string {
   if (!filePath) {
@@ -94,6 +126,7 @@ export default definePluginEntry({
               ...params,
             });
           },
+          deliverResultCard: deliverExecutionResultCard,
         }),
       {
         names: [
