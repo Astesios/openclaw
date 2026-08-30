@@ -295,6 +295,34 @@ describe("device pairing tokens", () => {
     expect(paired?.scopes).toEqual(expect.arrayContaining(["operator.read", "operator.write"]));
   });
 
+  test("supersedes approval when trusted client identity fields change", async () => {
+    const baseDir = await makeDevicePairingDir();
+    const identity = {
+      deviceId: "flowgo-approval-snapshot",
+      publicKey: "public-key-1",
+      clientId: "openclaw-pet",
+      clientMode: "ui" as const,
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      role: "operator",
+      scopes: ["operator.read"],
+    };
+    const first = await requestDevicePairing(identity, baseDir);
+
+    for (const patch of [
+      { clientId: "openclaw-android" },
+      { clientMode: "node" as const },
+      { platform: "android" },
+      { deviceFamily: "Android" },
+      { modelIdentifier: "other-pet" },
+    ]) {
+      const next = await requestDevicePairing({ ...identity, ...patch }, baseDir);
+      expect(next.created).toBe(true);
+      expect(next.request.requestId).not.toBe(first.request.requestId);
+    }
+  });
+
   test("approves mixed node and operator requests with admin caller scopes", async () => {
     const baseDir = await makeDevicePairingDir();
     const request = await requestDevicePairing(

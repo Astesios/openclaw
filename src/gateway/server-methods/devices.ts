@@ -142,7 +142,7 @@ function deniesCrossDeviceManagement(authz: DeviceManagementAuthz): boolean {
 }
 
 function deniesFlowGoAgentBinding(authz: DeviceManagementAuthz): boolean {
-  return !authz.isAdminCaller && authz.callerDeviceId !== authz.normalizedTargetDeviceId;
+  return !authz.isAdminCaller;
 }
 
 function shouldReturnRotatedDeviceToken(authz: DeviceManagementAuthz): boolean {
@@ -386,7 +386,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
     const authz = resolveDeviceManagementAuthz(client, deviceId);
     if (deniesFlowGoAgentBinding(authz)) {
       context.logGateway.warn(
-        `device agent binding denied device=${deviceId} reason=device-ownership-mismatch`,
+        `device agent binding denied device=${deviceId} reason=operator-admin-required`,
       );
       respond(
         false,
