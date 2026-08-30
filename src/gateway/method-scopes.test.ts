@@ -38,6 +38,7 @@ describe("method scope resolution", () => {
     ["sessions.messages.unsubscribe", ["operator.read"]],
     ["diagnostics.stability", ["operator.read"]],
     ["node.pair.approve", ["operator.pairing"]],
+    ["device.agent.bind", ["operator.pairing"]],
     ["poll", ["operator.write"]],
     ["update.status", ["operator.admin"]],
     ["config.patch", ["operator.admin"]],
@@ -111,6 +112,16 @@ describe("operator scope authorization", () => {
       allowed: true,
     });
     expect(authorizeOperatorScopesForMethod("node.pair.approve", ["operator.write"])).toEqual({
+      allowed: false,
+      missingScope: "operator.pairing",
+    });
+  });
+
+  it("requires pairing scope for device Agent binding", () => {
+    expect(authorizeOperatorScopesForMethod("device.agent.bind", ["operator.pairing"])).toEqual({
+      allowed: true,
+    });
+    expect(authorizeOperatorScopesForMethod("device.agent.bind", ["operator.write"])).toEqual({
       allowed: false,
       missingScope: "operator.pairing",
     });

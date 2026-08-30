@@ -6,12 +6,14 @@ import { issueDeviceBootstrapToken, verifyDeviceBootstrapToken } from "./device-
 import {
   approveBootstrapDevicePairing,
   approveDevicePairing,
+  bindFlowGoDeviceAgent,
   clearDevicePairing,
   ensureDeviceToken,
   getPairedDevice,
   hasEffectivePairedDeviceRole,
   listEffectivePairedDeviceRoles,
   listDevicePairing,
+  projectFlowGoDevice,
   removePairedDevice,
   requestDevicePairing,
   revokeDeviceToken,
@@ -47,6 +49,28 @@ async function setupPairedNodeDevice(baseDir: string) {
     baseDir,
   );
   await approveDevicePairing(request.request.requestId, { callerScopes: [] }, baseDir);
+}
+
+async function setupPairedFlowGoDevice(baseDir: string) {
+  const request = await requestDevicePairing(
+    {
+      deviceId: "flowgo-1",
+      publicKey: "public-key-flowgo-1",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      clientId: "openclaw-pet",
+      clientMode: "ui",
+      role: "operator",
+      scopes: ["operator.write"],
+    },
+    baseDir,
+  );
+  await approveDevicePairing(
+    request.request.requestId,
+    { callerScopes: ["operator.write"] },
+    baseDir,
+  );
 }
 
 async function setupOperatorToken(scopes: string[]) {
@@ -561,7 +585,7 @@ describe("device pairing tokens", () => {
     );
   });
 
-  test("metadata refresh cannot mutate approved role and scope fields", async () => {
+  test("metadata refresh cannot mutate approved identity, role, or scope fields", async () => {
     const baseDir = await makeDevicePairingDir();
     await setupPairedNodeDevice(baseDir);
 
@@ -575,6 +599,8 @@ describe("device pairing tokens", () => {
         approvedScopes: ["operator.admin"],
         tokens: {},
         publicKey: "attacker-key",
+        clientId: "openclaw-pet",
+        clientMode: "ui",
       } as unknown as Parameters<typeof updatePairedDeviceMetadata>[1],
       baseDir,
     );
@@ -582,6 +608,8 @@ describe("device pairing tokens", () => {
     const paired = await getPairedDevice("node-1", baseDir);
     expect(paired?.displayName).toBe("renamed-node");
     expect(paired?.publicKey).toBe("public-key-node-1");
+    expect(paired?.clientId).toBeUndefined();
+    expect(paired?.clientMode).toBeUndefined();
     expect(paired?.role).toBe("node");
     expect(paired?.roles).toEqual(["node"]);
     expect(paired?.scopes).toEqual([]);
@@ -1292,6 +1320,117 @@ describe("device pairing tokens", () => {
     await expect(getPairedDevice("device-1", baseDir)).resolves.toBeNull();
 
     await expect(removePairedDevice("device-1", baseDir)).resolves.toBeNull();
+  });
+
+  test("projects only the approved FlowGo operator identity", () => {
+    const flowGo = {
+      clientId: "openclaw-pet",
+      clientMode: "ui",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      role: "operator",
+    };
+    expect(projectFlowGoDevice(flowGo)).toEqual({ deviceType: "pet", deviceModel: "flowgo" });
+    for (const patch of [
+      { clientId: "openclaw-android" },
+      { clientMode: "node" },
+      { platform: "android" },
+      { deviceFamily: "Android" },
+      { modelIdentifier: "other-pet" },
+      { role: "node" },
+    ]) {
+      expect(projectFlowGoDevice({ ...flowGo, ...patch })).toBeNull();
+    }
+  });
+
+  test("binds FlowGo devices with monotonic compare-and-swap revisions", async () => {
+    const baseDir = await makeDevicePairingDir();
+    await setupPairedFlowGoDevice(baseDir);
+
+    await expect(
+      bindFlowGoDeviceAgent({
+        deviceId: "flowgo-1",
+        agentId: "pet-agent",
+        expectedRevision: 0,
+        baseDir,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      boundAgentId: "pet-agent",
+      bindingRevision: 1,
+    });
+    await expect(
+      bindFlowGoDeviceAgent({
+        deviceId: "flowgo-1",
+        agentId: "stale-agent",
+        expectedRevision: 0,
+        baseDir,
+      }),
+    ).resolves.toEqual({ ok: false, reason: "revision-conflict", bindingRevision: 1 });
+    await expect(getPairedDevice("flowgo-1", baseDir)).resolves.toMatchObject({
+      boundAgentId: "pet-agent",
+      bindingRevision: 1,
+    });
+  });
+
+  test("preserves FlowGo bindings across pairing repair and removes them with the device", async () => {
+    const baseDir = await makeDevicePairingDir();
+    await setupPairedFlowGoDevice(baseDir);
+    await bindFlowGoDeviceAgent({
+      deviceId: "flowgo-1",
+      agentId: "pet-agent",
+      expectedRevision: 0,
+      baseDir,
+    });
+    const repair = await requestDevicePairing(
+      {
+        deviceId: "flowgo-1",
+        publicKey: "public-key-flowgo-1-repaired",
+        platform: "linux",
+        deviceFamily: "RaspberryPi",
+        modelIdentifier: "FlowGo",
+        clientId: "openclaw-pet",
+        clientMode: "ui",
+        role: "operator",
+        scopes: ["operator.write"],
+      },
+      baseDir,
+    );
+    await approveDevicePairing(
+      repair.request.requestId,
+      { callerScopes: ["operator.write"] },
+      baseDir,
+    );
+
+    await expect(getPairedDevice("flowgo-1", baseDir)).resolves.toMatchObject({
+      boundAgentId: "pet-agent",
+      bindingRevision: 1,
+    });
+    await removePairedDevice("flowgo-1", baseDir);
+    await expect(getPairedDevice("flowgo-1", baseDir)).resolves.toBeNull();
+  });
+
+  test("rejects Agent binding for non-FlowGo and unknown devices without writing", async () => {
+    const baseDir = await makeDevicePairingDir();
+    await setupPairedOperatorDevice(baseDir, ["operator.write"]);
+    await expect(
+      bindFlowGoDeviceAgent({
+        deviceId: "device-1",
+        agentId: "pet-agent",
+        expectedRevision: 0,
+        baseDir,
+      }),
+    ).resolves.toEqual({ ok: false, reason: "not-flowgo" });
+    await expect(
+      bindFlowGoDeviceAgent({
+        deviceId: "missing",
+        agentId: "pet-agent",
+        expectedRevision: 0,
+        baseDir,
+      }),
+    ).resolves.toEqual({ ok: false, reason: "unknown-device" });
+    await expect(getPairedDevice("device-1", baseDir)).resolves.not.toHaveProperty("boundAgentId");
   });
 
   test("removing a paired device clears pending requests for that device only", async () => {

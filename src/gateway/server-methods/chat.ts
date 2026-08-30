@@ -73,6 +73,7 @@ import {
 import { stripEnvelopeFromMessage } from "../chat-sanitize.js";
 import { augmentChatHistoryWithCliSessionImports } from "../cli-session-history.js";
 import { isSuppressedControlReplyText } from "../control-reply-text.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import {
   attachManagedOutgoingImagesToMessage,
   cleanupManagedOutgoingImageRecords,
@@ -1967,8 +1968,23 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const rawSessionKey = p.sessionKey;
-    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
+    let rawSessionKey = p.sessionKey;
+    let loadedSession = loadSessionEntry(rawSessionKey);
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg: loadedSession.cfg,
+      existingSession: Boolean(loadedSession.entry?.sessionId),
+      requestedSessionKey: rawSessionKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route" && flowGoRoute.sessionKey) {
+      rawSessionKey = flowGoRoute.sessionKey;
+      loadedSession = loadSessionEntry(rawSessionKey);
+    }
+    const { cfg, entry, canonicalKey: sessionKey } = loadedSession;
     const requestedSessionId = normalizeOptionalText(p.sessionId);
     const backingSessionId = entry?.sessionId ?? requestedSessionId;
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey);

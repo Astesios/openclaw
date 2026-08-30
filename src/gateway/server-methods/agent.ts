@@ -97,6 +97,7 @@ import {
   resolveChatAttachmentMaxBytes,
 } from "../chat-attachments.js";
 import { resolveAssistantAvatarUrl } from "../control-ui-shared.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
 import { GATEWAY_CLIENT_CAPS, hasGatewayClientCap } from "../protocol/client-info.js";
 import {
@@ -592,6 +593,24 @@ export const agentHandlers: GatewayRequestHandlers = {
     const providerOverride = allowModelOverride ? request.provider : undefined;
     const modelOverride = allowModelOverride ? request.model : undefined;
     const cfg = context.getRuntimeConfig();
+    const initialSessionKey = normalizeOptionalString(request.sessionKey);
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg,
+      existingSession: initialSessionKey
+        ? Boolean(loadSessionEntry(initialSessionKey).entry?.sessionId)
+        : false,
+      requestedAgentId: normalizeOptionalString(request.agentId),
+      requestedSessionKey: initialSessionKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route") {
+      request.agentId = flowGoRoute.agentId;
+      request.sessionKey = flowGoRoute.sessionKey;
+    }
     const idem = request.idempotencyKey;
     const normalizedSpawned = normalizeSpawnedRunMetadata({
       groupId: request.groupId,
