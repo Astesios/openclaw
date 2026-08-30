@@ -140,7 +140,10 @@ import {
   resolveChatAttachmentMaxBytes,
 } from "../chat-attachments.js";
 import { resolveAssistantAvatarUrl } from "../control-ui-shared.js";
-import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
+import {
+  flowGoRequestedSessionIdMatchesOwnedEntry,
+  resolveFlowGoNewSessionRoute,
+} from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
 import {
   emitGatewaySessionEndPluginHook,
@@ -1167,10 +1170,12 @@ export const agentHandlers: GatewayRequestHandlers = {
     const initialSessionEntry = initialSessionKey
       ? loadSessionEntry(initialSessionKey).entry
       : undefined;
+    const flowGoForceNewSession = RESET_COMMAND_RE.test(request.message.trim());
     const flowGoRoute = await resolveFlowGoNewSessionRoute({
       client,
       cfg,
       existingSessionOwnerDeviceId: initialSessionEntry?.flowGoOwnerDeviceId,
+      forceNewSession: flowGoForceNewSession,
       requestedAgentId: normalizeOptionalString(request.agentId),
       requestedSessionKey: initialSessionKey,
     });
@@ -1502,6 +1507,23 @@ export const agentHandlers: GatewayRequestHandlers = {
             agentId,
           })
         : undefined);
+    const flowGoSessionEntry = requestedSessionKey
+      ? loadSessionEntry(requestedSessionKey).entry
+      : undefined;
+    if (
+      !flowGoRequestedSessionIdMatchesOwnedEntry({
+        route: flowGoRoute,
+        requestedSessionId,
+        ownedEntrySessionId: flowGoSessionEntry?.sessionId,
+      })
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo sessionId does not match its owned session"),
+      );
+      return;
+    }
     if (agentId && requestedSessionKeyRaw) {
       const parsedRequestedSessionKey = parseAgentSessionKey(requestedSessionKeyRaw);
       const requestedCanonicalKey = resolveSessionStoreKey({
