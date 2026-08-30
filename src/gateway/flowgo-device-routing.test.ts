@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PairedDevice } from "../infra/device-pairing.js";
-import { resolveFlowGoNewSessionRoute } from "./flowgo-device-routing.js";
+import {
+  flowGoRequestedSessionIdMatchesOwnedEntry,
+  resolveFlowGoNewSessionRoute,
+} from "./flowgo-device-routing.js";
 import type { GatewayClient } from "./server-methods/types.js";
 
 const getPairedDeviceMock = vi.hoisted(() => vi.fn());
@@ -163,7 +166,12 @@ describe("FlowGo new-session routing", () => {
         requestedAgentId: "main",
         requestedSessionKey: "agent:main:flowgo-device:flowgo-1:old-conversation",
       }),
-    ).resolves.toEqual({ kind: "unchanged" });
+    ).resolves.toEqual({
+      kind: "route",
+      agentId: "main",
+      sessionKey: "agent:main:flowgo-device:flowgo-1:old-conversation",
+      ownerDeviceId: "flowgo-1",
+    });
     await expect(
       resolveFlowGoNewSessionRoute({
         client: createClient(),
@@ -187,5 +195,54 @@ describe("FlowGo new-session routing", () => {
         requestedSessionKey: "agent:main:flowgo-device:flowgo-1:forged-by-sessions-patch",
       }),
     ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("pet-agent") });
+  });
+
+  it("routes /new from an owned pre-rebind session to the current binding", async () => {
+    getPairedDeviceMock.mockResolvedValue(flowGoDevice({ boundAgentId: "pet-agent" }));
+
+    await expect(
+      resolveFlowGoNewSessionRoute({
+        client: createClient(),
+        cfg,
+        existingSessionOwnerDeviceId: "flowgo-1",
+        forceNewSession: true,
+        requestedAgentId: "main",
+        requestedSessionKey: "agent:main:flowgo-device:flowgo-1:old-conversation",
+      }),
+    ).resolves.toEqual({
+      kind: "route",
+      agentId: "pet-agent",
+      sessionKey: "agent:pet-agent:flowgo-device:flowgo-1:old-conversation",
+      ownerDeviceId: "flowgo-1",
+    });
+  });
+
+  it("accepts only the backing sessionId already owned by the routed key", () => {
+    const route = {
+      kind: "route" as const,
+      agentId: "pet-agent",
+      sessionKey: "agent:pet-agent:flowgo-device:flowgo-1:main",
+      ownerDeviceId: "flowgo-1",
+    };
+    expect(
+      flowGoRequestedSessionIdMatchesOwnedEntry({
+        route,
+        requestedSessionId: "owned-session",
+        ownedEntrySessionId: "owned-session",
+      }),
+    ).toBe(true);
+    expect(
+      flowGoRequestedSessionIdMatchesOwnedEntry({
+        route,
+        requestedSessionId: "other-device-session",
+        ownedEntrySessionId: "owned-session",
+      }),
+    ).toBe(false);
+    expect(
+      flowGoRequestedSessionIdMatchesOwnedEntry({
+        route,
+        requestedSessionId: "other-device-session",
+      }),
+    ).toBe(false);
   });
 });

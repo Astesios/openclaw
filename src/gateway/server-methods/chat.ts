@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -73,7 +73,10 @@ import {
 import { stripEnvelopeFromMessage } from "../chat-sanitize.js";
 import { augmentChatHistoryWithCliSessionImports } from "../cli-session-history.js";
 import { isSuppressedControlReplyText } from "../control-reply-text.js";
-import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
+import {
+  flowGoRequestedSessionIdMatchesOwnedEntry,
+  resolveFlowGoNewSessionRoute,
+} from "../flowgo-device-routing.js";
 import {
   attachManagedOutgoingImagesToMessage,
   cleanupManagedOutgoingImageRecords,
@@ -1986,7 +1989,22 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
     const { cfg, entry, canonicalKey: sessionKey } = loadedSession;
     const requestedSessionId = normalizeOptionalText(p.sessionId);
-    let backingSessionId = entry?.sessionId ?? requestedSessionId;
+    if (
+      !flowGoRequestedSessionIdMatchesOwnedEntry({
+        route: flowGoRoute,
+        requestedSessionId,
+        ownedEntrySessionId: entry?.sessionId,
+      })
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo sessionId does not match its owned session"),
+      );
+      return;
+    }
+    let backingSessionId =
+      entry?.sessionId ?? (flowGoRoute.kind === "route" ? randomUUID() : requestedSessionId);
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey);
     if (deletedAgentId !== null) {
       respond(

@@ -13,18 +13,35 @@ export type FlowGoNewSessionRoute =
   | { kind: "error"; message: string }
   | { kind: "route"; agentId: string; sessionKey?: string; ownerDeviceId: string };
 
+export function flowGoRequestedSessionIdMatchesOwnedEntry(params: {
+  route: FlowGoNewSessionRoute;
+  requestedSessionId?: string;
+  ownedEntrySessionId?: string;
+}): boolean {
+  return (
+    params.route.kind !== "route" ||
+    !params.requestedSessionId ||
+    params.requestedSessionId === params.ownedEntrySessionId
+  );
+}
+
 const FLOWGO_SESSION_MARKER = "flowgo-device";
 
 function parseFlowGoOwnedSessionKey(sessionKey: string | undefined): {
   agentId: string;
   deviceId: string;
+  requestKey: string;
 } | null {
-  const match = sessionKey?.match(/^agent:([^:]+):flowgo-device:([^:]+):.+$/);
+  const match = sessionKey?.match(/^agent:([^:]+):flowgo-device:([^:]+):(.+)$/);
   if (!match) {
     return null;
   }
   try {
-    return { agentId: normalizeAgentId(match[1]), deviceId: decodeURIComponent(match[2]) };
+    return {
+      agentId: normalizeAgentId(match[1]),
+      deviceId: decodeURIComponent(match[2]),
+      requestKey: match[3],
+    };
   } catch {
     return null;
   }
@@ -39,6 +56,7 @@ export async function resolveFlowGoNewSessionRoute(params: {
   client: GatewayClient | null;
   cfg: OpenClawConfig;
   existingSessionOwnerDeviceId?: string;
+  forceNewSession?: boolean;
   requestedAgentId?: string;
   requestedSessionKey?: string;
 }): Promise<FlowGoNewSessionRoute> {
@@ -71,7 +89,7 @@ export async function resolveFlowGoNewSessionRoute(params: {
     if (ownedSession.deviceId !== deviceId) {
       return { kind: "error", message: "FlowGo session belongs to a different device" };
     }
-    if (params.existingSessionOwnerDeviceId) {
+    if (params.existingSessionOwnerDeviceId && !params.forceNewSession) {
       if (params.existingSessionOwnerDeviceId !== deviceId) {
         return { kind: "error", message: "FlowGo session belongs to a different device" };
       }
@@ -83,9 +101,14 @@ export async function resolveFlowGoNewSessionRoute(params: {
       }
       // Canonical FlowGo session keys carry server-verifiable device ownership.
       // This is the only path that may keep using the pre-rebind Agent.
-      return { kind: "unchanged" };
+      return {
+        kind: "route",
+        agentId: ownedSession.agentId,
+        sessionKey: rawSessionKey,
+        ownerDeviceId: deviceId,
+      };
     }
-    if (ownedSession.agentId !== effectiveAgentId) {
+    if (!params.forceNewSession && ownedSession.agentId !== effectiveAgentId) {
       return {
         kind: "error",
         message: `FlowGo device is bound to Agent "${effectiveAgentId}"`,
@@ -95,22 +118,33 @@ export async function resolveFlowGoNewSessionRoute(params: {
   const requestedAgentId = params.requestedAgentId
     ? normalizeAgentId(params.requestedAgentId)
     : undefined;
-  if (requestedAgentId && requestedAgentId !== effectiveAgentId) {
+  if (
+    requestedAgentId &&
+    requestedAgentId !== effectiveAgentId &&
+    !(params.forceNewSession && ownedSession?.deviceId === deviceId)
+  ) {
     return {
       kind: "error",
       message: `FlowGo device is bound to Agent "${effectiveAgentId}"`,
     };
   }
   const sessionAgentId = parseAgentSessionKey(rawSessionKey)?.agentId;
-  if (sessionAgentId && normalizeAgentId(sessionAgentId) !== effectiveAgentId) {
+  if (
+    sessionAgentId &&
+    normalizeAgentId(sessionAgentId) !== effectiveAgentId &&
+    !(params.forceNewSession && ownedSession?.deviceId === deviceId)
+  ) {
     return {
       kind: "error",
       message: `FlowGo device is bound to Agent "${effectiveAgentId}"`,
     };
   }
-  const baseRequestKey = rawSessionKey
-    ? stripAgentSessionPrefix(rawSessionKey)
-    : (params.cfg.session?.mainKey ?? "main");
+  const baseRequestKey =
+    params.forceNewSession && ownedSession
+      ? ownedSession.requestKey
+      : rawSessionKey
+        ? stripAgentSessionPrefix(rawSessionKey)
+        : (params.cfg.session?.mainKey ?? "main");
   const sessionKey = toAgentStoreSessionKey({
     agentId: effectiveAgentId,
     requestKey: `${FLOWGO_SESSION_MARKER}:${encodeURIComponent(deviceId)}:${baseRequestKey}`,
