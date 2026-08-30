@@ -368,6 +368,15 @@ function samePendingApprovalSnapshot(
   if (existing.publicKey !== incoming.publicKey) {
     return false;
   }
+  if (
+    existing.clientId !== incoming.clientId ||
+    existing.clientMode !== incoming.clientMode ||
+    existing.platform !== incoming.platform ||
+    existing.deviceFamily !== incoming.deviceFamily ||
+    existing.modelIdentifier !== incoming.modelIdentifier
+  ) {
+    return false;
+  }
   if (normalizeRole(existing.role) !== normalizeRole(incoming.role)) {
     return false;
   }
