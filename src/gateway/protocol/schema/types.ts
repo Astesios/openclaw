@@ -43,6 +43,7 @@ export type NodePendingEnqueueParams = SchemaType<"NodePendingEnqueueParams">;
 export type NodePendingEnqueueResult = SchemaType<"NodePendingEnqueueResult">;
 export type PushTestParams = SchemaType<"PushTestParams">;
 export type PushTestResult = SchemaType<"PushTestResult">;
+export type DeviceAgentBindParams = SchemaType<"DeviceAgentBindParams">;
 export type SessionsListParams = SchemaType<"SessionsListParams">;
 export type SessionsCleanupParams = SchemaType<"SessionsCleanupParams">;
 export type SessionsPreviewParams = SchemaType<"SessionsPreviewParams">;

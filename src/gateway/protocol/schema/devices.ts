@@ -18,6 +18,15 @@ export const DevicePairRemoveParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+export const DeviceAgentBindParamsSchema = Type.Object(
+  {
+    deviceId: NonEmptyString,
+    agentId: NonEmptyString,
+    expectedRevision: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
 export const DeviceTokenRotateParamsSchema = Type.Object(
   {
     deviceId: NonEmptyString,
@@ -43,6 +52,7 @@ export const DevicePairRequestedEventSchema = Type.Object(
     displayName: Type.Optional(NonEmptyString),
     platform: Type.Optional(NonEmptyString),
     deviceFamily: Type.Optional(NonEmptyString),
+    modelIdentifier: Type.Optional(NonEmptyString),
     clientId: Type.Optional(NonEmptyString),
     clientMode: Type.Optional(NonEmptyString),
     role: Type.Optional(NonEmptyString),

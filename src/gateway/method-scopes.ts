@@ -62,6 +62,7 @@ const METHOD_SCOPE_GROUPS: Record<OperatorScope, readonly string[]> = {
     "device.pair.approve",
     "device.pair.reject",
     "device.pair.remove",
+    "device.agent.bind",
     "device.token.rotate",
     "device.token.revoke",
     "node.rename",

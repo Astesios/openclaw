@@ -97,6 +97,10 @@ import {
   resolveChatAttachmentMaxBytes,
 } from "../chat-attachments.js";
 import { resolveAssistantAvatarUrl } from "../control-ui-shared.js";
+import {
+  flowGoRequestedSessionIdMatchesOwnedEntry,
+  resolveFlowGoNewSessionRoute,
+} from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
 import { GATEWAY_CLIENT_CAPS, hasGatewayClientCap } from "../protocol/client-info.js";
 import {
@@ -592,6 +596,27 @@ export const agentHandlers: GatewayRequestHandlers = {
     const providerOverride = allowModelOverride ? request.provider : undefined;
     const modelOverride = allowModelOverride ? request.model : undefined;
     const cfg = context.getRuntimeConfig();
+    const initialSessionKey = normalizeOptionalString(request.sessionKey);
+    const initialSessionEntry = initialSessionKey
+      ? loadSessionEntry(initialSessionKey).entry
+      : undefined;
+    const flowGoForceNewSession = RESET_COMMAND_RE.test(request.message.trim());
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg,
+      existingSessionOwnerDeviceId: initialSessionEntry?.flowGoOwnerDeviceId,
+      forceNewSession: flowGoForceNewSession,
+      requestedAgentId: normalizeOptionalString(request.agentId),
+      requestedSessionKey: initialSessionKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route") {
+      request.agentId = flowGoRoute.agentId;
+      request.sessionKey = flowGoRoute.sessionKey;
+    }
     const idem = request.idempotencyKey;
     const normalizedSpawned = normalizeSpawnedRunMetadata({
       groupId: request.groupId,
@@ -737,6 +762,23 @@ export const agentHandlers: GatewayRequestHandlers = {
             agentId,
           })
         : undefined);
+    const flowGoSessionEntry = requestedSessionKey
+      ? loadSessionEntry(requestedSessionKey).entry
+      : undefined;
+    if (
+      !flowGoRequestedSessionIdMatchesOwnedEntry({
+        route: flowGoRoute,
+        requestedSessionId,
+        ownedEntrySessionId: flowGoSessionEntry?.sessionId,
+      })
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo sessionId does not match its owned session"),
+      );
+      return;
+    }
     if (agentId && requestedSessionKeyRaw) {
       const sessionAgentId = resolveAgentIdFromSessionKey(requestedSessionKeyRaw);
       if (sessionAgentId !== agentId) {
@@ -1067,6 +1109,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         cliSessionIds: entry?.cliSessionIds,
         cliSessionBindings: entry?.cliSessionBindings,
         claudeCliSessionId: entry?.claudeCliSessionId,
+        ...(flowGoRoute.kind === "route" ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId } : {}),
       };
       sessionEntry = mergeSessionEntry(entry, nextEntryPatch);
       if (request.deliver === true) {

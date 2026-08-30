@@ -43,6 +43,7 @@ import {
   normalizeOptionalString,
   readStringValue,
 } from "../../shared/string-coerce.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { GATEWAY_CLIENT_IDS } from "../protocol/client-info.js";
 import {
@@ -967,9 +968,24 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
     const p = params;
     const cfg = context.getRuntimeConfig();
-    const requestedKey = normalizeOptionalString(p.key);
+    let requestedKey = normalizeOptionalString(p.key);
+    const requestedAgentId = normalizeOptionalString(p.agentId);
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg,
+      requestedAgentId,
+      requestedSessionKey: requestedKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route") {
+      requestedKey = flowGoRoute.sessionKey;
+    }
     const agentId = normalizeAgentId(
-      normalizeOptionalString(p.agentId) ?? resolveDefaultAgentId(cfg),
+      (flowGoRoute.kind === "route" ? flowGoRoute.agentId : requestedAgentId) ??
+        resolveDefaultAgentId(cfg),
     );
     if (requestedKey) {
       const requestedAgentId = parseAgentSessionKey(requestedKey)?.agentId;
@@ -1023,12 +1039,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         },
         loadGatewayModelCatalog: context.loadGatewayModelCatalog,
       });
-      if (!patched.ok || !canonicalParentSessionKey) {
+      if (!patched.ok) {
+        return patched;
+      }
+      if (!canonicalParentSessionKey && flowGoRoute.kind !== "route") {
         return patched;
       }
       const nextEntry: SessionEntry = {
         ...patched.entry,
-        parentSessionKey: canonicalParentSessionKey,
+        ...(flowGoRoute.kind === "route" ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId } : {}),
+        ...(canonicalParentSessionKey ? { parentSessionKey: canonicalParentSessionKey } : {}),
       };
       store[target.canonicalKey] = nextEntry;
       return {

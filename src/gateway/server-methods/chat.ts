@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -14,7 +14,7 @@ import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.j
 import { stageSandboxMedia } from "../../auto-reply/reply/stage-sandbox-media.js";
 import type { MsgContext, TemplateContext } from "../../auto-reply/templating.js";
 import { extractCanvasFromText } from "../../chat/canvas-render.js";
-import { resolveSessionFilePath } from "../../config/sessions.js";
+import { resolveSessionFilePath, updateSessionStore } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage, formatUncaughtError } from "../../infra/errors.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
@@ -73,6 +73,10 @@ import {
 import { stripEnvelopeFromMessage } from "../chat-sanitize.js";
 import { augmentChatHistoryWithCliSessionImports } from "../cli-session-history.js";
 import { isSuppressedControlReplyText } from "../control-reply-text.js";
+import {
+  flowGoRequestedSessionIdMatchesOwnedEntry,
+  resolveFlowGoNewSessionRoute,
+} from "../flowgo-device-routing.js";
 import {
   attachManagedOutgoingImagesToMessage,
   cleanupManagedOutgoingImageRecords,
@@ -1967,10 +1971,40 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const rawSessionKey = p.sessionKey;
-    const { cfg, entry, canonicalKey: sessionKey } = loadSessionEntry(rawSessionKey);
+    let rawSessionKey = p.sessionKey;
+    let loadedSession = loadSessionEntry(rawSessionKey);
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg: loadedSession.cfg,
+      existingSessionOwnerDeviceId: loadedSession.entry?.flowGoOwnerDeviceId,
+      requestedSessionKey: rawSessionKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route" && flowGoRoute.sessionKey) {
+      rawSessionKey = flowGoRoute.sessionKey;
+      loadedSession = loadSessionEntry(rawSessionKey);
+    }
+    const { cfg, entry, canonicalKey: sessionKey } = loadedSession;
     const requestedSessionId = normalizeOptionalText(p.sessionId);
-    const backingSessionId = entry?.sessionId ?? requestedSessionId;
+    if (
+      !flowGoRequestedSessionIdMatchesOwnedEntry({
+        route: flowGoRoute,
+        requestedSessionId,
+        ownedEntrySessionId: entry?.sessionId,
+      })
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo sessionId does not match its owned session"),
+      );
+      return;
+    }
+    let backingSessionId =
+      entry?.sessionId ?? (flowGoRoute.kind === "route" ? randomUUID() : requestedSessionId);
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey);
     if (deletedAgentId !== null) {
       respond(
@@ -2000,6 +2034,20 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
+    if (flowGoRoute.kind === "route") {
+      const ownedEntry = await updateSessionStore(loadedSession.storePath, (store) => {
+        const existing = store[sessionKey];
+        const next = {
+          ...existing,
+          sessionId: existing?.sessionId ?? backingSessionId ?? clientRunId,
+          updatedAt: Math.max(existing?.updatedAt ?? 0, now),
+          flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
+        };
+        store[sessionKey] = next;
+        return next;
+      });
+      backingSessionId = ownedEntry.sessionId;
+    }
 
     const sendPolicy = resolveSendPolicy({
       cfg,

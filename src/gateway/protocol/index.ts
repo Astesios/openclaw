@@ -139,6 +139,8 @@ import {
   CronUpdateParamsSchema,
   type DevicePairApproveParams,
   DevicePairApproveParamsSchema,
+  type DeviceAgentBindParams,
+  DeviceAgentBindParamsSchema,
   type DevicePairListParams,
   DevicePairListParamsSchema,
   type DevicePairRemoveParams,
@@ -567,6 +569,9 @@ export const validateCronRunsParams = ajv.compile<CronRunsParams>(CronRunsParams
 export const validateDevicePairListParams = ajv.compile<DevicePairListParams>(
   DevicePairListParamsSchema,
 );
+export const validateDeviceAgentBindParams = ajv.compile<DeviceAgentBindParams>(
+  DeviceAgentBindParamsSchema,
+);
 export const validateDevicePairApproveParams = ajv.compile<DevicePairApproveParams>(
   DevicePairApproveParamsSchema,
 );
@@ -839,6 +844,7 @@ export type {
   NodePairListParams,
   NodePairApproveParams,
   DevicePairListParams,
+  DeviceAgentBindParams,
   DevicePairApproveParams,
   DevicePairRejectParams,
   ConfigGetParams,

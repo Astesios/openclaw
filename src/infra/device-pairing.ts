@@ -29,6 +29,7 @@ export type DevicePairingPendingRequest = {
   displayName?: string;
   platform?: string;
   deviceFamily?: string;
+  modelIdentifier?: string;
   clientId?: string;
   clientMode?: string;
   role?: string;
@@ -81,6 +82,7 @@ export type PairedDevice = {
   displayName?: string;
   platform?: string;
   deviceFamily?: string;
+  modelIdentifier?: string;
   clientId?: string;
   clientMode?: string;
   role?: string;
@@ -93,11 +95,32 @@ export type PairedDevice = {
   approvedAtMs: number;
   lastSeenAtMs?: number;
   lastSeenReason?: string;
+  boundAgentId?: string;
+  bindingRevision?: number;
 };
+
+export type FlowGoDeviceProjection = {
+  deviceType: "pet";
+  deviceModel: "flowgo";
+};
+
+export type BindFlowGoDeviceAgentResult =
+  | {
+      ok: true;
+      deviceId: string;
+      previousBoundAgentId?: string;
+      boundAgentId: string;
+      bindingRevision: number;
+    }
+  | {
+      ok: false;
+      reason: "unknown-device" | "not-flowgo" | "revision-conflict";
+      bindingRevision?: number;
+    };
 
 export type PairedDeviceMetadataPatch = Pick<
   PairedDevice,
-  "displayName" | "clientId" | "clientMode" | "remoteIp" | "lastSeenAtMs" | "lastSeenReason"
+  "displayName" | "remoteIp" | "lastSeenAtMs" | "lastSeenReason"
 >;
 
 export type DevicePairingList = {
@@ -189,6 +212,31 @@ async function persistState(
 
 function normalizeDeviceId(deviceId: string) {
   return deviceId.trim();
+}
+
+function normalizeBindingRevision(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
+function normalizeIdentityValue(value: string | undefined): string {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+export function projectFlowGoDevice(
+  device: Pick<
+    PairedDevice,
+    "clientId" | "clientMode" | "platform" | "deviceFamily" | "modelIdentifier" | "role" | "roles"
+  >,
+): FlowGoDeviceProjection | null {
+  const roles = mergeRoles(device.roles, device.role) ?? [];
+  const isFlowGoIdentity =
+    normalizeIdentityValue(device.clientId) === "openclaw-pet" &&
+    normalizeIdentityValue(device.clientMode) === "ui" &&
+    normalizeIdentityValue(device.platform) === "linux" &&
+    normalizeIdentityValue(device.deviceFamily) === "raspberrypi" &&
+    normalizeIdentityValue(device.modelIdentifier) === "flowgo" &&
+    roles.includes(OPERATOR_ROLE);
+  return isFlowGoIdentity ? { deviceType: "pet", deviceModel: "flowgo" } : null;
 }
 
 function normalizeRole(role: string | undefined): string | null {
@@ -318,6 +366,15 @@ function samePendingApprovalSnapshot(
   if (existing.publicKey !== incoming.publicKey) {
     return false;
   }
+  if (
+    existing.clientId !== incoming.clientId ||
+    existing.clientMode !== incoming.clientMode ||
+    existing.platform !== incoming.platform ||
+    existing.deviceFamily !== incoming.deviceFamily ||
+    existing.modelIdentifier !== incoming.modelIdentifier
+  ) {
+    return false;
+  }
   if (normalizeRole(existing.role) !== normalizeRole(incoming.role)) {
     return false;
   }
@@ -341,6 +398,7 @@ function refreshPendingDevicePairingRequest(
     displayName: incoming.displayName ?? existing.displayName,
     platform: incoming.platform ?? existing.platform,
     deviceFamily: incoming.deviceFamily ?? existing.deviceFamily,
+    modelIdentifier: incoming.modelIdentifier ?? existing.modelIdentifier,
     clientId: incoming.clientId ?? existing.clientId,
     clientMode: incoming.clientMode ?? existing.clientMode,
     remoteIp: incoming.remoteIp ?? existing.remoteIp,
@@ -377,6 +435,7 @@ function buildPendingDevicePairingRequest(params: {
     displayName: params.req.displayName,
     platform: params.req.platform,
     deviceFamily: params.req.deviceFamily,
+    modelIdentifier: params.req.modelIdentifier,
     clientId: params.req.clientId,
     clientMode: params.req.clientMode,
     role,
@@ -650,6 +709,7 @@ export async function approveDevicePairing(
       displayName: pending.displayName,
       platform: pending.platform,
       deviceFamily: pending.deviceFamily,
+      modelIdentifier: pending.modelIdentifier,
       clientId: pending.clientId,
       clientMode: pending.clientMode,
       role: pending.role,
@@ -660,6 +720,8 @@ export async function approveDevicePairing(
       tokens,
       createdAtMs: existing?.createdAtMs ?? now,
       approvedAtMs: now,
+      boundAgentId: existing?.boundAgentId,
+      bindingRevision: existing?.bindingRevision,
     };
     delete state.pendingById[requestId];
     state.pairedByDeviceId[device.deviceId] = device;
@@ -744,6 +806,7 @@ export async function approveBootstrapDevicePairing(
       displayName: pending.displayName,
       platform: pending.platform,
       deviceFamily: pending.deviceFamily,
+      modelIdentifier: pending.modelIdentifier,
       clientId: pending.clientId,
       clientMode: pending.clientMode,
       role: pending.role,
@@ -754,6 +817,8 @@ export async function approveBootstrapDevicePairing(
       tokens,
       createdAtMs: existing?.createdAtMs ?? now,
       approvedAtMs: now,
+      boundAgentId: existing?.boundAgentId,
+      bindingRevision: existing?.bindingRevision,
     };
     delete state.pendingById[requestId];
     state.pairedByDeviceId[device.deviceId] = device;
@@ -802,6 +867,45 @@ export async function removePairedDevice(
   });
 }
 
+export async function bindFlowGoDeviceAgent(params: {
+  deviceId: string;
+  agentId: string;
+  expectedRevision: number;
+  baseDir?: string;
+}): Promise<BindFlowGoDeviceAgentResult> {
+  return await withLock(async () => {
+    const state = await loadState(params.baseDir);
+    const deviceId = normalizeDeviceId(params.deviceId);
+    const device = state.pairedByDeviceId[deviceId];
+    if (!device) {
+      return { ok: false, reason: "unknown-device" };
+    }
+    if (!projectFlowGoDevice(device)) {
+      return { ok: false, reason: "not-flowgo" };
+    }
+    const bindingRevision = normalizeBindingRevision(device.bindingRevision);
+    if (params.expectedRevision !== bindingRevision) {
+      return { ok: false, reason: "revision-conflict", bindingRevision };
+    }
+    const previousBoundAgentId = normalizeRole(device.boundAgentId) ?? undefined;
+    const boundAgentId = params.agentId.trim();
+    const nextRevision = bindingRevision + 1;
+    state.pairedByDeviceId[deviceId] = {
+      ...device,
+      boundAgentId,
+      bindingRevision: nextRevision,
+    };
+    await persistState(state, params.baseDir, "paired");
+    return {
+      ok: true,
+      deviceId,
+      previousBoundAgentId,
+      boundAgentId,
+      bindingRevision: nextRevision,
+    };
+  });
+}
+
 export async function updatePairedDeviceMetadata(
   deviceId: string,
   patch: Partial<PairedDeviceMetadataPatch>,
@@ -817,12 +921,6 @@ export async function updatePairedDeviceMetadata(
     const next = { ...existing };
     if ("displayName" in patch) {
       next.displayName = patch.displayName;
-    }
-    if ("clientId" in patch) {
-      next.clientId = patch.clientId;
-    }
-    if ("clientMode" in patch) {
-      next.clientMode = patch.clientMode;
     }
     if ("remoteIp" in patch) {
       next.remoteIp = patch.remoteIp;

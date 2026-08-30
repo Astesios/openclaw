@@ -907,6 +907,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
             displayName: connectParams.client.displayName,
             platform: connectParams.client.platform,
             deviceFamily: connectParams.client.deviceFamily,
+            modelIdentifier: connectParams.client.modelIdentifier,
             clientId: connectParams.client.id,
             clientMode: connectParams.client.mode,
             role,
@@ -915,8 +916,6 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
           };
           const clientAccessMetadata = {
             displayName: connectParams.client.displayName,
-            clientId: connectParams.client.id,
-            clientMode: connectParams.client.mode,
             remoteIp: reportedClientIp,
           };
           const requirePairing = async (
@@ -1228,8 +1227,8 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               }
             }
 
-            // Metadata pinning is approval-bound. Reconnects can update access metadata,
-            // but platform/device family must stay on the approved pairing record.
+            // Identity metadata is approval-bound. Reconnects may refresh only
+            // presentation/access facts; otherwise product type could change without approval.
             await updatePairedDeviceMetadata(device.id, clientAccessMetadata);
           }
         }
