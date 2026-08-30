@@ -12,18 +12,21 @@ import {
 } from "../../../packages/gateway-protocol/src/index.js";
 import {
   approveDevicePairing,
+  bindFlowGoDeviceAgent,
   formatDevicePairingForbiddenMessage,
   getPairedDevice,
   getPendingDevicePairing,
   listDevicePairing,
+  projectFlowGoDevice,
   removePairedDevice,
-  type DeviceAuthToken,
   type RevokeDeviceTokenDenyReason,
   type RotateDeviceTokenDenyReason,
   rejectDevicePairing,
   revokeDeviceToken,
   rotateDeviceToken,
   summarizeDeviceTokens,
+  type DevicePairingPendingRequest,
+  type PairedDevice,
 } from "../../infra/device-pairing.js";
 import type { DiagnosticSecurityEventInput } from "../../infra/diagnostic-events.js";
 import {
@@ -55,6 +58,11 @@ function redactPairedDevice(
   return {
     ...rest,
     tokens: summarizeDeviceTokens(tokens),
+    ...projection,
+    ...(boundAgentId ? { boundAgentId } : {}),
+    ...(agentAvailable ? { effectiveAgentId: candidateAgentId } : {}),
+    agentAvailability: agentAvailable ? "available" : "unavailable",
+    bindingRevision,
   };
 }
 
@@ -202,7 +210,7 @@ function emitDeviceTokenLifecycleSecurityEvent(params: {
 
 /** Gateway request handlers for device pair approval, removal, token rotation, and revocation. */
 export const deviceHandlers: GatewayRequestHandlers = {
-  "device.pair.list": async ({ params, respond, client }) => {
+  "device.pair.list": async ({ params, respond, client, context }) => {
     if (!validateDevicePairListParams(params)) {
       respond(
         false,
@@ -217,6 +225,9 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const list = await listDevicePairing();
+    const cfg = context.getRuntimeConfig();
+    const agentIds = listAgentIds(cfg);
+    const defaultAgentId = normalizeAgentId(resolveDefaultAgentId(cfg));
     const authz = resolveDeviceSessionAuthz(client);
     const visibleList =
       authz.callerDeviceId && !authz.isAdminCaller
@@ -230,8 +241,10 @@ export const deviceHandlers: GatewayRequestHandlers = {
     respond(
       true,
       {
-        pending: visibleList.pending,
-        paired: visibleList.paired.map((device) => redactPairedDevice(device)),
+        pending: visibleList.pending.map((device) => redactPendingDevice(device)),
+        paired: visibleList.paired.map((device) =>
+          redactPairedDevice({ device, agentIds, defaultAgentId }),
+        ),
       },
       undefined,
     );
@@ -339,7 +352,19 @@ export const deviceHandlers: GatewayRequestHandlers = {
       },
       { dropIfSlow: true },
     );
-    respond(true, { requestId, device: redactPairedDevice(approved.device) }, undefined);
+    const cfg = context.getRuntimeConfig();
+    respond(
+      true,
+      {
+        requestId,
+        device: redactPairedDevice({
+          device: approved.device,
+          agentIds: listAgentIds(cfg),
+          defaultAgentId: normalizeAgentId(resolveDefaultAgentId(cfg)),
+        }),
+      },
+      undefined,
+    );
   },
   "device.pair.reject": async ({ params, respond, context, client }) => {
     if (!validateDevicePairRejectParams(params)) {
@@ -486,6 +511,72 @@ export const deviceHandlers: GatewayRequestHandlers = {
     queueMicrotask(() => {
       context.disconnectClientsForDevice?.(removed.deviceId);
     });
+  },
+  "device.agent.bind": async ({ params, respond, context, client }) => {
+    if (!validateDeviceAgentBindParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid device.agent.bind params: ${formatValidationErrors(
+            validateDeviceAgentBindParams.errors,
+          )}`,
+        ),
+      );
+      return;
+    }
+    const {
+      deviceId,
+      agentId: rawAgentId,
+      expectedRevision,
+    } = params as {
+      deviceId: string;
+      agentId: string;
+      expectedRevision: number;
+    };
+    const authz = resolveDeviceManagementAuthz(client, deviceId);
+    if (deniesFlowGoAgentBinding(authz)) {
+      context.logGateway.warn(
+        `device agent binding denied device=${deviceId} reason=device-ownership-mismatch`,
+      );
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "device agent binding denied"),
+      );
+      return;
+    }
+    const agentId = normalizeAgentId(rawAgentId);
+    if (!listAgentIds(context.getRuntimeConfig()).includes(agentId)) {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown agentId"));
+      return;
+    }
+    const result = await bindFlowGoDeviceAgent({ deviceId, agentId, expectedRevision });
+    if (!result.ok) {
+      const message =
+        result.reason === "unknown-device"
+          ? "unknown deviceId"
+          : result.reason === "not-flowgo"
+            ? "device is not FlowGo"
+            : `device agent binding revision conflict: current revision ${result.bindingRevision}`;
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, message));
+      return;
+    }
+    context.logGateway.info(
+      `device agent binding updated device=${result.deviceId} oldAgent=${result.previousBoundAgentId ?? "<default>"} newAgent=${result.boundAgentId} revision=${result.bindingRevision}`,
+    );
+    respond(
+      true,
+      {
+        deviceId: result.deviceId,
+        boundAgentId: result.boundAgentId,
+        effectiveAgentId: result.boundAgentId,
+        agentAvailability: "available",
+        bindingRevision: result.bindingRevision,
+      },
+      undefined,
+    );
   },
   "device.token.rotate": async ({ params, respond, context, client }) => {
     if (!validateDeviceTokenRotateParams(params)) {

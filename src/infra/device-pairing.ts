@@ -32,6 +32,7 @@ export type DevicePairingPendingRequest = {
   displayName?: string;
   platform?: string;
   deviceFamily?: string;
+  modelIdentifier?: string;
   clientId?: string;
   clientMode?: string;
   role?: string;
@@ -94,6 +95,7 @@ export type PairedDevice = {
   displayName?: string;
   platform?: string;
   deviceFamily?: string;
+  modelIdentifier?: string;
   clientId?: string;
   clientMode?: string;
   role?: string;
@@ -106,6 +108,8 @@ export type PairedDevice = {
   approvedAtMs: number;
   lastSeenAtMs?: number;
   lastSeenReason?: string;
+  boundAgentId?: string;
+  bindingRevision?: number;
 };
 
 /** Metadata fields a device may refresh without changing approval or token state. */
@@ -223,6 +227,31 @@ async function persistState(
 
 function normalizeDeviceId(deviceId: string) {
   return deviceId.trim();
+}
+
+function normalizeBindingRevision(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : 0;
+}
+
+function normalizeIdentityValue(value: string | undefined): string {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+export function projectFlowGoDevice(
+  device: Pick<
+    PairedDevice,
+    "clientId" | "clientMode" | "platform" | "deviceFamily" | "modelIdentifier" | "role" | "roles"
+  >,
+): FlowGoDeviceProjection | null {
+  const roles = mergeRoles(device.roles, device.role) ?? [];
+  const isFlowGoIdentity =
+    normalizeIdentityValue(device.clientId) === "openclaw-pet" &&
+    normalizeIdentityValue(device.clientMode) === "ui" &&
+    normalizeIdentityValue(device.platform) === "linux" &&
+    normalizeIdentityValue(device.deviceFamily) === "raspberrypi" &&
+    normalizeIdentityValue(device.modelIdentifier) === "flowgo" &&
+    roles.includes(OPERATOR_ROLE);
+  return isFlowGoIdentity ? { deviceType: "pet", deviceModel: "flowgo" } : null;
 }
 
 function normalizeRole(role: string | undefined): string | null {
@@ -362,6 +391,7 @@ function refreshPendingDevicePairingRequest(
     displayName: incoming.displayName ?? existing.displayName,
     platform: incoming.platform ?? existing.platform,
     deviceFamily: incoming.deviceFamily ?? existing.deviceFamily,
+    modelIdentifier: incoming.modelIdentifier ?? existing.modelIdentifier,
     clientId: incoming.clientId ?? existing.clientId,
     clientMode: incoming.clientMode ?? existing.clientMode,
     remoteIp: incoming.remoteIp ?? existing.remoteIp,
@@ -398,6 +428,7 @@ function buildPendingDevicePairingRequest(params: {
     displayName: params.req.displayName,
     platform: params.req.platform,
     deviceFamily: params.req.deviceFamily,
+    modelIdentifier: params.req.modelIdentifier,
     clientId: params.req.clientId,
     clientMode: params.req.clientMode,
     role,

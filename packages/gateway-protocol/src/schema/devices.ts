@@ -57,6 +57,7 @@ export const DevicePairRequestedEventSchema = Type.Object(
     displayName: Type.Optional(NonEmptyString),
     platform: Type.Optional(NonEmptyString),
     deviceFamily: Type.Optional(NonEmptyString),
+    modelIdentifier: Type.Optional(NonEmptyString),
     clientId: Type.Optional(NonEmptyString),
     clientMode: Type.Optional(NonEmptyString),
     role: Type.Optional(NonEmptyString),

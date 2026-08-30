@@ -11,6 +11,7 @@ import type { GatewayRequestHandlerOptions } from "./types.js";
 
 const {
   approveDevicePairingMock,
+  bindFlowGoDeviceAgentMock,
   getPairedDeviceMock,
   getPendingDevicePairingMock,
   listDevicePairingMock,
@@ -20,6 +21,7 @@ const {
   rotateDeviceTokenMock,
 } = vi.hoisted(() => ({
   approveDevicePairingMock: vi.fn(),
+  bindFlowGoDeviceAgentMock: vi.fn(),
   getPairedDeviceMock: vi.fn(),
   getPendingDevicePairingMock: vi.fn(),
   listDevicePairingMock: vi.fn(),
@@ -36,6 +38,7 @@ vi.mock("../../infra/device-pairing.js", async () => {
   return {
     ...actual,
     approveDevicePairing: approveDevicePairingMock,
+    bindFlowGoDeviceAgent: bindFlowGoDeviceAgentMock,
     getPairedDevice: getPairedDeviceMock,
     getPendingDevicePairing: getPendingDevicePairingMock,
     listDevicePairing: listDevicePairingMock,
@@ -710,11 +713,10 @@ describe("deviceHandlers", () => {
     expect(opts.respond).toHaveBeenCalledWith(
       true,
       {
-        pending: [{ requestId: "req-1", deviceId: "device-1", publicKey: "pk-1", ts: 100 }],
+        pending: [{ requestId: "req-1", deviceId: "device-1", ts: 100 }],
         paired: [
           {
             deviceId: "device-1",
-            publicKey: "pk-1",
             approvedAtMs: 100,
             createdAtMs: 50,
             tokens: undefined,
@@ -752,20 +754,18 @@ describe("deviceHandlers", () => {
       true,
       {
         pending: [
-          { requestId: "req-1", deviceId: "device-1", publicKey: "pk-1", ts: 100 },
-          { requestId: "req-2", deviceId: "device-2", publicKey: "pk-2", ts: 200 },
+          { requestId: "req-1", deviceId: "device-1", ts: 100 },
+          { requestId: "req-2", deviceId: "device-2", ts: 200 },
         ],
         paired: [
           {
             deviceId: "device-1",
-            publicKey: "pk-1",
             approvedAtMs: 100,
             createdAtMs: 50,
             tokens: undefined,
           },
           {
             deviceId: "device-2",
-            publicKey: "pk-2",
             approvedAtMs: 200,
             createdAtMs: 60,
             tokens: undefined,
@@ -794,11 +794,10 @@ describe("deviceHandlers", () => {
     expect(opts.respond).toHaveBeenCalledWith(
       true,
       {
-        pending: [{ requestId: "req-1", deviceId: "device-1", publicKey: "pk-1", ts: 100 }],
+        pending: [{ requestId: "req-1", deviceId: "device-1", ts: 100 }],
         paired: [
           {
             deviceId: "device-2",
-            publicKey: "pk-2",
             approvedAtMs: 200,
             createdAtMs: 60,
             tokens: undefined,
@@ -831,13 +830,12 @@ describe("deviceHandlers", () => {
       true,
       {
         pending: [
-          { requestId: "req-1", deviceId: "device-1", publicKey: "pk-1", ts: 100 },
-          { requestId: "req-2", deviceId: "device-2", publicKey: "pk-2", ts: 200 },
+          { requestId: "req-1", deviceId: "device-1", ts: 100 },
+          { requestId: "req-2", deviceId: "device-2", ts: 200 },
         ],
         paired: [
           {
             deviceId: "device-2",
-            publicKey: "pk-2",
             approvedAtMs: 200,
             createdAtMs: 60,
             tokens: undefined,
@@ -846,6 +844,162 @@ describe("deviceHandlers", () => {
       },
       undefined,
     );
+  });
+
+  it("projects FlowGo bindings without exposing public keys", async () => {
+    listDevicePairingMock.mockResolvedValue({
+      pending: [],
+      paired: [
+        {
+          deviceId: "flowgo-default",
+          publicKey: "secret-public-key-1",
+          clientId: "openclaw-pet",
+          clientMode: "ui",
+          platform: "linux",
+          deviceFamily: "RaspberryPi",
+          modelIdentifier: "FlowGo",
+          role: "operator",
+          approvedAtMs: 100,
+          createdAtMs: 50,
+        },
+        {
+          deviceId: "flowgo-missing-agent",
+          publicKey: "secret-public-key-2",
+          clientId: "openclaw-pet",
+          clientMode: "ui",
+          platform: "linux",
+          deviceFamily: "RaspberryPi",
+          modelIdentifier: "FlowGo",
+          role: "operator",
+          boundAgentId: "deleted-agent",
+          bindingRevision: 4,
+          approvedAtMs: 200,
+          createdAtMs: 60,
+        },
+      ],
+    });
+    const opts = createOptions("device.pair.list", {});
+
+    await deviceHandlers["device.pair.list"](opts);
+
+    const response = vi.mocked(opts.respond).mock.calls[0]?.[1] as {
+      paired: Array<Record<string, unknown>>;
+    };
+    expect(response.paired[0]).toMatchObject({
+      deviceId: "flowgo-default",
+      deviceType: "pet",
+      deviceModel: "flowgo",
+      effectiveAgentId: "main",
+      agentAvailability: "available",
+      bindingRevision: 0,
+    });
+    expect(response.paired[1]).toMatchObject({
+      deviceId: "flowgo-missing-agent",
+      boundAgentId: "deleted-agent",
+      agentAvailability: "unavailable",
+      bindingRevision: 4,
+    });
+    expect(response.paired[1]).not.toHaveProperty("effectiveAgentId");
+    expect(JSON.stringify(response)).not.toContain("secret-public-key");
+  });
+
+  it("binds a FlowGo device and returns the new revision", async () => {
+    bindFlowGoDeviceAgentMock.mockResolvedValue({
+      ok: true,
+      deviceId: "flowgo-1",
+      previousBoundAgentId: "main",
+      boundAgentId: "pet-agent",
+      bindingRevision: 3,
+    });
+    const opts = createOptions(
+      "device.agent.bind",
+      {
+        deviceId: "flowgo-1",
+        agentId: "pet-agent",
+        expectedRevision: 2,
+      },
+      { client: createClient(["operator.pairing"], "flowgo-1", { isDeviceTokenAuth: true }) },
+    );
+
+    await deviceHandlers["device.agent.bind"](opts);
+
+    expect(bindFlowGoDeviceAgentMock).toHaveBeenCalledWith({
+      deviceId: "flowgo-1",
+      agentId: "pet-agent",
+      expectedRevision: 2,
+    });
+    expect(opts.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ boundAgentId: "pet-agent", bindingRevision: 3 }),
+      undefined,
+    );
+  });
+
+  it("rejects cross-device, unknown-Agent, and stale FlowGo binding writes", async () => {
+    const crossDevice = createOptions(
+      "device.agent.bind",
+      { deviceId: "flowgo-2", agentId: "pet-agent", expectedRevision: 0 },
+      { client: createClient(["operator.pairing"], "flowgo-1", { isDeviceTokenAuth: true }) },
+    );
+    await deviceHandlers["device.agent.bind"](crossDevice);
+    expect(bindFlowGoDeviceAgentMock).not.toHaveBeenCalled();
+
+    const unknownAgent = createOptions(
+      "device.agent.bind",
+      {
+        deviceId: "flowgo-1",
+        agentId: "missing-agent",
+        expectedRevision: 0,
+      },
+      { client: createClient(["operator.pairing"], "flowgo-1", { isDeviceTokenAuth: true }) },
+    );
+    await deviceHandlers["device.agent.bind"](unknownAgent);
+    expect(bindFlowGoDeviceAgentMock).not.toHaveBeenCalled();
+
+    bindFlowGoDeviceAgentMock.mockResolvedValue({
+      ok: false,
+      reason: "revision-conflict",
+      bindingRevision: 2,
+    });
+    const stale = createOptions(
+      "device.agent.bind",
+      {
+        deviceId: "flowgo-1",
+        agentId: "pet-agent",
+        expectedRevision: 1,
+      },
+      { client: createClient(["operator.pairing"], "flowgo-1", { isDeviceTokenAuth: true }) },
+    );
+    await deviceHandlers["device.agent.bind"](stale);
+    expect(stale.respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ message: expect.stringContaining("current revision 2") }),
+    );
+  });
+
+  it("requires either the target device identity or admin scope for FlowGo binding", async () => {
+    const sharedPairing = createOptions(
+      "device.agent.bind",
+      { deviceId: "flowgo-1", agentId: "pet-agent", expectedRevision: 0 },
+      { client: createClient(["operator.pairing"]) },
+    );
+    await deviceHandlers["device.agent.bind"](sharedPairing);
+    expect(bindFlowGoDeviceAgentMock).not.toHaveBeenCalled();
+
+    bindFlowGoDeviceAgentMock.mockResolvedValue({
+      ok: true,
+      deviceId: "flowgo-1",
+      boundAgentId: "pet-agent",
+      bindingRevision: 1,
+    });
+    const admin = createOptions(
+      "device.agent.bind",
+      { deviceId: "flowgo-1", agentId: "pet-agent", expectedRevision: 0 },
+      { client: createClient(["operator.admin"]) },
+    );
+    await deviceHandlers["device.agent.bind"](admin);
+    expect(bindFlowGoDeviceAgentMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects approving another device from a non-admin device session", async () => {
@@ -905,7 +1059,6 @@ describe("deviceHandlers", () => {
         requestId: "req-2",
         device: {
           deviceId: "device-2",
-          publicKey: "pk-2",
           approvedAtMs: 200,
           createdAtMs: 150,
           tokens: undefined,
@@ -968,7 +1121,6 @@ describe("deviceHandlers", () => {
         requestId: "req-1",
         device: {
           deviceId: "device-1",
-          publicKey: "pk-1",
           approvedAtMs: 100,
           createdAtMs: 50,
           tokens: undefined,

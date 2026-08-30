@@ -1330,9 +1330,25 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     }
     const p = params;
     const cfg = context.getRuntimeConfig();
-    const requestedKey = normalizeOptionalString(p.key);
+    let requestedKey = normalizeOptionalString(p.key);
+    const requestedAgentId = normalizeOptionalString(p.agentId);
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg,
+      existingSession: false,
+      requestedAgentId,
+      requestedSessionKey: requestedKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route") {
+      requestedKey = flowGoRoute.sessionKey;
+    }
     const agentId = normalizeAgentId(
-      normalizeOptionalString(p.agentId) ?? resolveDefaultAgentId(cfg),
+      (flowGoRoute.kind === "route" ? flowGoRoute.agentId : requestedAgentId) ??
+        resolveDefaultAgentId(cfg),
     );
     if (requestedKey) {
       const requestedAgentId = parseAgentSessionKey(requestedKey)?.agentId;
