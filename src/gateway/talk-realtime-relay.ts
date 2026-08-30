@@ -505,6 +505,19 @@ export function createTalkRealtimeRelaySession(
     onEvent: (event) => {
       const relay = relayRef.current;
       if (event.direction === "client") {
+        if (event.type === "response.barge_in" && relay?.talk.activeTurnId) {
+          if (event.detail?.includes("state=active-response") === true) {
+            relay.providerCancelRequests.push({
+              turnId: relay.talk.activeTurnId,
+              toolContinuation: false,
+            });
+            if (relay.providerCancelRequests.length > MAX_RELAY_RESPONSE_CORRELATIONS) {
+              relay.providerCancelRequests.shift();
+            }
+          }
+          emit({ relaySessionId, type: "clear" }, cancelRelayTurnState(relay, "provider-barge-in"));
+          return;
+        }
         if (
           event.type === "response.cancel" &&
           event.detail?.includes("reason=discard-barge-in-response") !== true &&
@@ -536,10 +549,6 @@ export function createTalkRealtimeRelaySession(
           }
           relay.responseTurns.delete(oldestResponseId);
         }
-      }
-      if (event.type === "input_audio_buffer.speech_started" && relay) {
-        emit({ relaySessionId, type: "clear" }, cancelRelayTurnState(relay, "provider-barge-in"));
-        return;
       }
       if (
         event.type === "conversation.output_audio.delta" ||
