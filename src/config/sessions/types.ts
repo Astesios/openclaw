@@ -211,6 +211,8 @@ export type RestartRecoveryRun = {
 };
 
 export type SessionEntry = {
+  /** Gateway-authenticated FlowGo device that owns this session; never client-patchable. */
+  flowGoOwnerDeviceId?: string;
   /**
    * Last delivered heartbeat payload (used to suppress duplicate heartbeat notifications).
    * Stored on the main session entry.

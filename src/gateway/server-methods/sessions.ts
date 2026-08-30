@@ -1335,7 +1335,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const flowGoRoute = await resolveFlowGoNewSessionRoute({
       client,
       cfg,
-      existingSession: false,
       requestedAgentId,
       requestedSessionKey: requestedKey,
     });
