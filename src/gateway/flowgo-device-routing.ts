@@ -11,7 +11,7 @@ import type { GatewayClient } from "./server-methods/types.js";
 export type FlowGoNewSessionRoute =
   | { kind: "unchanged" }
   | { kind: "error"; message: string }
-  | { kind: "route"; agentId: string; sessionKey?: string };
+  | { kind: "route"; agentId: string; sessionKey?: string; ownerDeviceId: string };
 
 const FLOWGO_SESSION_MARKER = "flowgo-device";
 
@@ -38,7 +38,7 @@ function stripAgentSessionPrefix(sessionKey: string): string {
 export async function resolveFlowGoNewSessionRoute(params: {
   client: GatewayClient | null;
   cfg: OpenClawConfig;
-  existingSession: boolean;
+  existingSessionOwnerDeviceId?: string;
   requestedAgentId?: string;
   requestedSessionKey?: string;
 }): Promise<FlowGoNewSessionRoute> {
@@ -71,7 +71,10 @@ export async function resolveFlowGoNewSessionRoute(params: {
     if (ownedSession.deviceId !== deviceId) {
       return { kind: "error", message: "FlowGo session belongs to a different device" };
     }
-    if (params.existingSession) {
+    if (params.existingSessionOwnerDeviceId) {
+      if (params.existingSessionOwnerDeviceId !== deviceId) {
+        return { kind: "error", message: "FlowGo session belongs to a different device" };
+      }
       const requestedAgentId = params.requestedAgentId
         ? normalizeAgentId(params.requestedAgentId)
         : undefined;
@@ -113,5 +116,5 @@ export async function resolveFlowGoNewSessionRoute(params: {
     requestKey: `${FLOWGO_SESSION_MARKER}:${encodeURIComponent(deviceId)}:${baseRequestKey}`,
     mainKey: params.cfg.session?.mainKey,
   });
-  return { kind: "route", agentId: effectiveAgentId, sessionKey };
+  return { kind: "route", agentId: effectiveAgentId, sessionKey, ownerDeviceId: deviceId };
 }

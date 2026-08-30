@@ -11,6 +11,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "pluginExtensions",
   "pluginExtensionSlotKeys",
   "pluginNextTurnInjections",
+  "flowGoOwnerDeviceId",
   "sessionId",
   "updatedAt",
   "sessionFile",

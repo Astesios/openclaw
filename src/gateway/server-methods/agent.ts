@@ -594,12 +594,13 @@ export const agentHandlers: GatewayRequestHandlers = {
     const modelOverride = allowModelOverride ? request.model : undefined;
     const cfg = context.getRuntimeConfig();
     const initialSessionKey = normalizeOptionalString(request.sessionKey);
+    const initialSessionEntry = initialSessionKey
+      ? loadSessionEntry(initialSessionKey).entry
+      : undefined;
     const flowGoRoute = await resolveFlowGoNewSessionRoute({
       client,
       cfg,
-      existingSession: initialSessionKey
-        ? Boolean(loadSessionEntry(initialSessionKey).entry?.sessionId)
-        : false,
+      existingSessionOwnerDeviceId: initialSessionEntry?.flowGoOwnerDeviceId,
       requestedAgentId: normalizeOptionalString(request.agentId),
       requestedSessionKey: initialSessionKey,
     });
@@ -1086,6 +1087,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         cliSessionIds: entry?.cliSessionIds,
         cliSessionBindings: entry?.cliSessionBindings,
         claudeCliSessionId: entry?.claudeCliSessionId,
+        ...(flowGoRoute.kind === "route" ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId } : {}),
       };
       sessionEntry = mergeSessionEntry(entry, nextEntryPatch);
       if (request.deliver === true) {

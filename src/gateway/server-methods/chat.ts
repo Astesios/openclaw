@@ -14,7 +14,7 @@ import { createReplyDispatcher } from "../../auto-reply/reply/reply-dispatcher.j
 import { stageSandboxMedia } from "../../auto-reply/reply/stage-sandbox-media.js";
 import type { MsgContext, TemplateContext } from "../../auto-reply/templating.js";
 import { extractCanvasFromText } from "../../chat/canvas-render.js";
-import { resolveSessionFilePath } from "../../config/sessions.js";
+import { resolveSessionFilePath, updateSessionStore } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage, formatUncaughtError } from "../../infra/errors.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
@@ -1973,7 +1973,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const flowGoRoute = await resolveFlowGoNewSessionRoute({
       client,
       cfg: loadedSession.cfg,
-      existingSession: Boolean(loadedSession.entry?.sessionId),
+      existingSessionOwnerDeviceId: loadedSession.entry?.flowGoOwnerDeviceId,
       requestedSessionKey: rawSessionKey,
     });
     if (flowGoRoute.kind === "error") {
@@ -1986,7 +1986,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
     const { cfg, entry, canonicalKey: sessionKey } = loadedSession;
     const requestedSessionId = normalizeOptionalText(p.sessionId);
-    const backingSessionId = entry?.sessionId ?? requestedSessionId;
+    let backingSessionId = entry?.sessionId ?? requestedSessionId;
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey);
     if (deletedAgentId !== null) {
       respond(
@@ -2016,6 +2016,20 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
     const now = Date.now();
     const clientRunId = p.idempotencyKey;
+    if (flowGoRoute.kind === "route") {
+      const ownedEntry = await updateSessionStore(loadedSession.storePath, (store) => {
+        const existing = store[sessionKey];
+        const next = {
+          ...existing,
+          sessionId: existing?.sessionId ?? backingSessionId ?? clientRunId,
+          updatedAt: Math.max(existing?.updatedAt ?? 0, now),
+          flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
+        };
+        store[sessionKey] = next;
+        return next;
+      });
+      backingSessionId = ownedEntry.sessionId;
+    }
 
     const sendPolicy = resolveSendPolicy({
       cfg,

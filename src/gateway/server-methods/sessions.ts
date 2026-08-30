@@ -973,7 +973,6 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     const flowGoRoute = await resolveFlowGoNewSessionRoute({
       client,
       cfg,
-      existingSession: false,
       requestedAgentId,
       requestedSessionKey: requestedKey,
     });
@@ -1040,12 +1039,16 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         },
         loadGatewayModelCatalog: context.loadGatewayModelCatalog,
       });
-      if (!patched.ok || !canonicalParentSessionKey) {
+      if (!patched.ok) {
+        return patched;
+      }
+      if (!canonicalParentSessionKey && flowGoRoute.kind !== "route") {
         return patched;
       }
       const nextEntry: SessionEntry = {
         ...patched.entry,
-        parentSessionKey: canonicalParentSessionKey,
+        ...(flowGoRoute.kind === "route" ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId } : {}),
+        ...(canonicalParentSessionKey ? { parentSessionKey: canonicalParentSessionKey } : {}),
       };
       store[target.canonicalKey] = nextEntry;
       return {

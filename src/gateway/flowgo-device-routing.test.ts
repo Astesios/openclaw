@@ -69,13 +69,13 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: false,
         requestedSessionKey: "main",
       }),
     ).resolves.toEqual({
       kind: "route",
       agentId: "pet-agent",
       sessionKey: "agent:pet-agent:flowgo-device:flowgo-1:main",
+      ownerDeviceId: "flowgo-1",
     });
   });
 
@@ -86,12 +86,12 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: false,
       }),
     ).resolves.toEqual({
       kind: "route",
       agentId: "main",
       sessionKey: "agent:main:flowgo-device:flowgo-1:main",
+      ownerDeviceId: "flowgo-1",
     });
   });
 
@@ -102,7 +102,6 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: false,
         requestedAgentId: "main",
       }),
     ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("pet-agent") });
@@ -110,7 +109,6 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: false,
         requestedSessionKey: "agent:main:main",
       }),
     ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("pet-agent") });
@@ -119,13 +117,14 @@ describe("FlowGo new-session routing", () => {
   it("fails closed when the bound Agent or paired device is unavailable", async () => {
     getPairedDeviceMock.mockResolvedValueOnce(flowGoDevice({ boundAgentId: "deleted-agent" }));
     await expect(
-      resolveFlowGoNewSessionRoute({ client: createClient(), cfg, existingSession: false }),
+      resolveFlowGoNewSessionRoute({ client: createClient(), cfg }),
     ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("rebind") });
 
     getPairedDeviceMock.mockResolvedValueOnce(null);
-    await expect(
-      resolveFlowGoNewSessionRoute({ client: createClient(), cfg, existingSession: false }),
-    ).resolves.toEqual({ kind: "error", message: "paired device is no longer available" });
+    await expect(resolveFlowGoNewSessionRoute({ client: createClient(), cfg })).resolves.toEqual({
+      kind: "error",
+      message: "paired device is no longer available",
+    });
   });
 
   it("routes shared-auth FlowGo and does not trust an unrelated existing session", async () => {
@@ -134,7 +133,6 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: true,
         requestedAgentId: "main",
         requestedSessionKey: "agent:main:existing",
       }),
@@ -143,7 +141,6 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(false),
         cfg,
-        existingSession: false,
         requestedAgentId: "pet-agent",
         requestedSessionKey: "main",
       }),
@@ -151,6 +148,7 @@ describe("FlowGo new-session routing", () => {
       kind: "route",
       agentId: "pet-agent",
       sessionKey: "agent:pet-agent:flowgo-device:flowgo-1:main",
+      ownerDeviceId: "flowgo-1",
     });
   });
 
@@ -161,7 +159,7 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: true,
+        existingSessionOwnerDeviceId: "flowgo-1",
         requestedAgentId: "main",
         requestedSessionKey: "agent:main:flowgo-device:flowgo-1:old-conversation",
       }),
@@ -170,12 +168,24 @@ describe("FlowGo new-session routing", () => {
       resolveFlowGoNewSessionRoute({
         client: createClient(),
         cfg,
-        existingSession: true,
+        existingSessionOwnerDeviceId: "flowgo-1",
         requestedSessionKey: "agent:main:flowgo-device:other-device:old-conversation",
       }),
     ).resolves.toMatchObject({
       kind: "error",
       message: expect.stringContaining("different device"),
     });
+  });
+
+  it("does not trust a forged FlowGo-shaped session without persisted ownership", async () => {
+    getPairedDeviceMock.mockResolvedValue(flowGoDevice({ boundAgentId: "pet-agent" }));
+
+    await expect(
+      resolveFlowGoNewSessionRoute({
+        client: createClient(),
+        cfg,
+        requestedSessionKey: "agent:main:flowgo-device:flowgo-1:forged-by-sessions-patch",
+      }),
+    ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("pet-agent") });
   });
 });
