@@ -53,8 +53,18 @@ function isManifestlessBundledRuntimeSupportPackage(params) {
   return params.topLevelPublicSurfaceEntries.length > 0;
 }
 
-function shouldBuildBundledDistEntry(packageJson) {
-  return packageJson?.openclaw?.build?.bundledDist !== false;
+function shouldBuildBundledDistEntry(packageJson, dirName, env) {
+  if (packageJson?.openclaw?.build?.bundledDist !== false) {
+    return true;
+  }
+
+  const dockerExtensions = env.OPENCLAW_EXTENSIONS;
+  if (typeof dockerExtensions !== "string") {
+    return false;
+  }
+  // Docker's explicit keep list also opts externalized plugins into this image build.
+  // Otherwise pruning can keep their source while no runnable dist entry exists.
+  return dockerExtensions.split(/[\s,]+/u).includes(dirName);
 }
 
 function isExcludedTopLevelPublicSurfaceFile(fileName) {
@@ -216,7 +226,7 @@ export function collectBundledPluginBuildEntries(params = {}) {
     if (!shouldBuildBundledCluster(dirName, env, { packageJson })) {
       continue;
     }
-    if (!shouldBuildBundledDistEntry(packageJson)) {
+    if (!shouldBuildBundledDistEntry(packageJson, dirName, env)) {
       continue;
     }
     if (EXCLUDED_CORE_BUNDLED_PLUGIN_DIRS.has(dirName)) {
