@@ -79,8 +79,16 @@ jobs:
             set -eu
             chromium_path="$(readlink -f /usr/local/bin/chromium)"
             flowos_path="$(readlink -f /usr/local/bin/flowos-qa-chromium)"
+            system_path="$(readlink -f /usr/bin/chromium)"
             test -x "$chromium_path"
             test "$chromium_path" = "$flowos_path"
+            test "$chromium_path" = "$system_path"
+            test ! -w "$flowos_path"
+            test ! -w "$(dirname "$flowos_path")"
+            test ! -w /opt
+            test ! -w /opt/openclaw
+            test ! -w /usr/bin
+            test ! -w /usr/local/bin
             /usr/local/bin/flowos-qa-chromium --version
 
             profile="$(mktemp -d)"
