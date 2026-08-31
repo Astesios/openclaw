@@ -1337,6 +1337,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
           const requirePairing = async (
             reason: ConnectPairingRequiredReason,
             existingPairedDevice: Awaited<ReturnType<typeof getPairedDevice>> | null = null,
+            options?: { forceInteractive?: boolean },
           ) => {
             const pairingStateAllowsRequestedAccess = (
               pairedCandidate: Awaited<ReturnType<typeof getPairedDevice>>,
@@ -1348,17 +1349,21 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
                 return false;
               }
               if (scopes.length === 0) {
-                return true;
+                return reason !== "metadata-upgrade" || pairingMetadataMatches(pairedCandidate);
               }
               const pairedScopes = resolvePairedAccessScopes(pairedCandidate);
               if (pairedScopes.length === 0) {
                 return false;
               }
-              return roleScopesAllow({
+              const accessAllowed = roleScopesAllow({
                 role,
                 requestedScopes: scopes,
                 allowedScopes: pairedScopes,
               });
+              return (
+                accessAllowed &&
+                (reason !== "metadata-upgrade" || pairingMetadataMatches(pairedCandidate))
+              );
             };
             const allowSilentExistingNonOperatorPairing = !(
               existingPairedDevice && role !== "operator"
@@ -1434,7 +1439,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
                   }
                 : {}),
               silent:
-                reason === "scope-upgrade"
+                reason === "scope-upgrade" || options?.forceInteractive === true
                   ? false
                   : allowSilentLocalPairing ||
                     allowSilentTrustedCidrsNodePairing ||
@@ -1611,13 +1616,9 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               deviceFamilyMismatch,
               modelIdentifierMismatch,
             } = metadataPinning;
-            if (
-              clientIdMismatch ||
-              clientModeMismatch ||
-              platformMismatch ||
-              deviceFamilyMismatch ||
-              modelIdentifierMismatch
-            ) {
+            const approvalBoundIdentityMismatch =
+              clientIdMismatch || clientModeMismatch || modelIdentifierMismatch;
+            if (approvalBoundIdentityMismatch || platformMismatch || deviceFamilyMismatch) {
               const allowSilentMetadataUpgrade = shouldAllowSilentLocalPairing({
                 locality: pairingLocality,
                 hasBrowserOriginHeader,
@@ -1631,7 +1632,9 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
                   `security audit: device metadata upgrade requested reason=metadata-upgrade device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedClient=${connectParams.client.id} pinnedClient=${paired.clientId ?? "<none>"} claimedMode=${connectParams.client.mode} pinnedMode=${paired.clientMode ?? "<none>"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} claimedModel=${claimedModelIdentifier ?? "<none>"} pinnedModel=${pairedModelIdentifier ?? "<none>"} conn=${connId}`,
                 );
               }
-              const ok = await requirePairing("metadata-upgrade", paired);
+              const ok = await requirePairing("metadata-upgrade", paired, {
+                forceInteractive: approvalBoundIdentityMismatch,
+              });
               if (!ok) {
                 return;
               }

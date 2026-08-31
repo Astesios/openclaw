@@ -12,28 +12,35 @@ import { connectReq, installGatewayTestHooks, startServerWithClient } from "./te
 
 installGatewayTestHooks({ scope: "suite" });
 
+async function seedLegacyPetIdentity(name: string) {
+  const loaded = loadDeviceIdentity(name);
+  const request = await requestDevicePairing({
+    deviceId: loaded.identity.deviceId,
+    publicKey: loaded.publicKey,
+    platform: "linux",
+    deviceFamily: "RaspberryPi",
+    clientId: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+    clientMode: GATEWAY_CLIENT_MODES.UI,
+    role: "operator",
+    scopes: ["operator.read", "operator.write"],
+  });
+  const approval = await approveDevicePairing(request.request.requestId, {
+    callerScopes: ["operator.read", "operator.write"],
+  });
+  if (!approval || approval.status !== "approved") {
+    throw new Error("failed to seed legacy paired device");
+  }
+  const token = approval.device.tokens?.operator?.token;
+  if (!token) {
+    throw new Error("legacy paired device is missing its operator token");
+  }
+  return { ...loaded, token };
+}
+
 describe("gateway FlowGo identity repair", () => {
   test("requires approval before replacing a legacy client snapshot and hands off the rotated token", async () => {
     const started = await startServerWithClient("secret");
-    const loaded = loadDeviceIdentity("flowgo-identity-repair");
-    const legacyRequest = await requestDevicePairing({
-      deviceId: loaded.identity.deviceId,
-      publicKey: loaded.publicKey,
-      platform: "linux",
-      deviceFamily: "RaspberryPi",
-      clientId: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
-      clientMode: GATEWAY_CLIENT_MODES.UI,
-      role: "operator",
-      scopes: ["operator.read", "operator.write"],
-    });
-    const legacyApproval = await approveDevicePairing(legacyRequest.request.requestId, {
-      callerScopes: ["operator.read", "operator.write"],
-    });
-    if (!legacyApproval || legacyApproval.status !== "approved") {
-      throw new Error("failed to seed legacy paired device");
-    }
-    const legacyToken = legacyApproval.device.tokens?.operator?.token;
-    expect(legacyToken).toBeTruthy();
+    const loaded = await seedLegacyPetIdentity("flowgo-identity-repair");
 
     const flowGoClient = {
       id: GATEWAY_CLIENT_NAMES.PET,
@@ -70,7 +77,7 @@ describe("gateway FlowGo identity repair", () => {
         deviceFamily: "RaspberryPi",
       });
       expect(afterRejection?.modelIdentifier).toBeUndefined();
-      expect(afterRejection?.tokens?.operator?.token).toBe(legacyToken);
+      expect(afterRejection?.tokens?.operator?.token).toBe(loaded.token);
 
       const pairing = await listDevicePairing();
       expect(pairing.pending).toHaveLength(1);
@@ -92,7 +99,7 @@ describe("gateway FlowGo identity repair", () => {
       }
       const rotatedToken = approval.device.tokens?.operator?.token;
       expect(rotatedToken).toBeTruthy();
-      expect(rotatedToken).not.toBe(legacyToken);
+      expect(rotatedToken).not.toBe(loaded.token);
 
       approvedReconnectWs = await openTrackedWs(started.port);
       const approvedReconnect = await connectReq(approvedReconnectWs, {
@@ -119,6 +126,59 @@ describe("gateway FlowGo identity repair", () => {
     } finally {
       repairWs?.close();
       approvedReconnectWs?.close();
+      started.ws.close();
+      await started.server.close();
+      started.envSnapshot.restore();
+    }
+  });
+
+  test("does not trust a direct-local client that self-declares a native app identity", async () => {
+    const started = await startServerWithClient("secret");
+    const loaded = await seedLegacyPetIdentity("flowgo-native-identity-bypass");
+    let spoofedWs: WebSocket | undefined;
+
+    try {
+      spoofedWs = await openTrackedWs(started.port);
+      const attempt = await connectReq(spoofedWs, {
+        token: "secret",
+        deviceIdentityPath: loaded.identityPath,
+        client: {
+          id: GATEWAY_CLIENT_NAMES.ANDROID_APP,
+          version: "1.0.0",
+          platform: "linux",
+          mode: GATEWAY_CLIENT_MODES.UI,
+          deviceFamily: "RaspberryPi",
+          modelIdentifier: "FlowGo",
+        },
+        scopes: ["operator.read", "operator.write"],
+      });
+
+      expect(attempt.ok).toBe(false);
+      expect((attempt.error?.details as { reason?: unknown } | undefined)?.reason).toBe(
+        "metadata-upgrade",
+      );
+      const pending = await listDevicePairing();
+      expect(pending.pending).toHaveLength(1);
+      expect(pending.pending[0]).toMatchObject({
+        deviceId: loaded.identity.deviceId,
+        clientId: GATEWAY_CLIENT_NAMES.ANDROID_APP,
+        clientMode: GATEWAY_CLIENT_MODES.UI,
+        modelIdentifier: "FlowGo",
+        silent: false,
+        isRepair: true,
+      });
+
+      const paired = await getPairedDevice(loaded.identity.deviceId);
+      expect(paired).toMatchObject({
+        clientId: GATEWAY_CLIENT_NAMES.GATEWAY_CLIENT,
+        clientMode: GATEWAY_CLIENT_MODES.UI,
+        platform: "linux",
+        deviceFamily: "RaspberryPi",
+      });
+      expect(paired?.modelIdentifier).toBeUndefined();
+      expect(paired?.tokens?.operator?.token).toBe(loaded.token);
+    } finally {
+      spoofedWs?.close();
       started.ws.close();
       await started.server.close();
       started.envSnapshot.restore();
