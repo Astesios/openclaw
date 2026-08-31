@@ -404,6 +404,11 @@ describe("core gateway method classification", () => {
     expect(unclassified).toStrictEqual([]);
   });
 
+  it("exposes FlowGo agent binding through the core gateway registry", () => {
+    expect(listGatewayMethods()).toContain("device.agent.bind");
+    expect(coreGatewayHandlers).toHaveProperty("device.agent.bind");
+  });
+
   it("exposes skill proposal methods through the core gateway registry", () => {
     for (const method of ["skills.proposals.list", "skills.proposals.inspect"]) {
       expect(listGatewayMethods()).toContain(method);

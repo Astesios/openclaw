@@ -10,6 +10,7 @@ import { Type } from "typebox";
 import {
   childSessionKey,
   type FinalizationPlan,
+  normalizeChildAgentId,
   type RunBinding,
   RunBindingStore,
 } from "./bindings.js";
@@ -309,6 +310,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         ) {
           throw new Error("child progress capability is no longer active");
         }
+        if (latestBinding.finalizationPlan && !isSubagentSessionKey(requireSession(deps.context))) {
+          throw new Error(
+            "FlowOS Execution owner stage is unavailable after result plan acceptance",
+          );
+        }
         if (
           latestBinding.resultDelivery?.status === "PREPARED" ||
           latestBinding.resultDelivery?.status === "EXECUTION_COMPLETED"
@@ -361,6 +367,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         resultPlan?: Omit<FinalizationPlan, "workspaceDir">;
       };
       const requesterSessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
+      const targetAgentId = normalizeChildAgentId(params.agentId);
       const finalizationPlan = params.resultPlan
         ? { ...params.resultPlan, workspaceDir: requireWorkspaceDir(deps.context) }
         : undefined;
@@ -376,8 +383,17 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             "ROUTEBOOK_GENERATION spawn requires resultPlan with spaceId, artifactTitle, artifactFilePath, artifactType, and cardCaption",
           );
         }
+        if (
+          current.taskKind === plannedRoutebookTaskKind &&
+          finalizationPlan?.artifactType !== "html"
+        ) {
+          throw new Error("ROUTEBOOK_GENERATION result plan requires an HTML Artifact");
+        }
+        if (current.taskKind !== plannedRoutebookTaskKind && finalizationPlan) {
+          throw new Error("FlowOS Execution result plan is only available to ROUTEBOOK_GENERATION");
+        }
         if (current.targetAgentId) {
-          if (current.targetAgentId !== params.agentId) {
+          if (current.targetAgentId !== targetAgentId) {
             throw new Error("FlowOS Execution Attempt is already assigned to another agent");
           }
           if (!sameFinalizationPlan(current.finalizationPlan, finalizationPlan)) {
@@ -396,12 +412,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         if (finalizationPlan && detail.spaceId !== finalizationPlan.spaceId) {
           throw new Error("FlowOS Execution result plan does not match the bound space");
         }
-        const childKey = childSessionKey(params.agentId, params.executionId, params.attemptId);
-        const runId = stableRunId(params.executionId, params.attemptId, params.agentId);
+        const childKey = childSessionKey(targetAgentId, params.executionId, params.attemptId);
+        const runId = stableRunId(params.executionId, params.attemptId, targetAgentId);
         const claim = await deps.bindings.claimSpawn({
           executionId: params.executionId,
           attemptId: params.attemptId,
-          targetAgentId: params.agentId,
+          targetAgentId,
           childSessionKey: childKey,
           runId,
           finalizationPlan,
@@ -491,6 +507,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+        if (binding.finalizationPlan) {
+          throw new Error(
+            "FlowOS Execution owner completion is unavailable after result plan acceptance",
+          );
+        }
         if (!binding.targetAgentId || binding.status !== "ENDED_OK") {
           throw new Error("FlowOS Execution child run has not ended successfully");
         }
@@ -559,6 +580,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+        if (binding.finalizationPlan) {
+          throw new Error(
+            "FlowOS Execution owner failure is unavailable after result plan acceptance",
+          );
+        }
         const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
         const item = await deps.client.fail(params.executionId, {
           expectedVersion: current.version,

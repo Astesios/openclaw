@@ -13,10 +13,10 @@ afterEach(() => {
   }
 });
 
-function fixture(content = "<html>validated</html>") {
+function fixture(content = "<html>validated</html>", spaceId = "sp-trip") {
   const workspaceDir = mkdtempSync(join(tmpdir(), "flowos-artifact-validator-"));
   roots.push(workspaceDir);
-  const generated = join(workspaceDir, "spaces", "sp-trip", "generated");
+  const generated = join(workspaceDir, "spaces", spaceId, "generated");
   const scripts = join(workspaceDir, "skills", "lushu", "scripts");
   mkdirSync(generated, { recursive: true });
   mkdirSync(scripts, { recursive: true });
@@ -66,5 +66,42 @@ describe("trusted Space Artifact validator", () => {
         artifactType: "html",
       }),
     ).rejects.toThrow("validator rejected");
+  });
+
+  it("accepts a path-safe Unicode Space id", async () => {
+    const spaceId = "sp_烟台看海_483cfc";
+    const { workspaceDir } = fixture("<html>validated</html>", spaceId);
+    const runCommandWithTimeout = vi.fn(async () => ({ code: 0 }));
+
+    await expect(
+      validateSpaceArtifact({
+        runtime: { system: { runCommandWithTimeout } } as never,
+        workspaceDir,
+        spaceId,
+        filePath: "generated/lushu.html",
+        artifactType: "html",
+      }),
+    ).resolves.toMatchObject({ validatorId: "lushu-html-v1" });
+  });
+
+  it.each([
+    ".",
+    "..",
+    "../escape",
+    "sp/escape",
+    "sp\\escape",
+    "sp\u0000escape",
+    `sp-${"a".repeat(126)}`,
+  ])("rejects an unsafe Space id: %s", async (spaceId) => {
+    const { workspaceDir } = fixture();
+    await expect(
+      validateSpaceArtifact({
+        runtime: { system: { runCommandWithTimeout: vi.fn() } } as never,
+        workspaceDir,
+        spaceId,
+        filePath: "generated/lushu.html",
+        artifactType: "html",
+      }),
+    ).rejects.toThrow("invalid spaceId");
   });
 });
