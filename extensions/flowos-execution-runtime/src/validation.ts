@@ -12,11 +12,25 @@ function contained(parent: string, child: string): boolean {
   return child === parent || child.startsWith(`${parent}${sep}`);
 }
 
+function isSafeSpaceId(value: string): boolean {
+  const characters = Array.from(value);
+  if (characters.length < 1 || characters.length > 128 || value === "." || value === "..") {
+    return false;
+  }
+  if (characters[0] === "." && characters[1] === ".") {
+    return false;
+  }
+  return characters.every((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return character !== "/" && character !== "\\" && codePoint > 0x1f && codePoint !== 0x7f;
+  });
+}
+
 function resolveArtifactPath(params: { workspaceDir: string; spaceId: string; filePath: string }): {
   workspace: string;
   target: string;
 } {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(params.spaceId)) {
+  if (!isSafeSpaceId(params.spaceId)) {
     throw new Error("Space Artifact has an invalid spaceId");
   }
   const parts = params.filePath.split("/");

@@ -148,8 +148,13 @@ export class RunBindingStore {
   }
 }
 
+export function normalizeChildAgentId(agentId: string): string {
+  const unprefixed = agentId.trim().replace(/^agent:/, "");
+  return unprefixed.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64) || "agent";
+}
+
 export function childSessionKey(agentId: string, executionId: string, attemptId: string): string {
-  const safeAgent = agentId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 64) || "agent";
+  const safeAgent = normalizeChildAgentId(agentId);
   const suffix = `${executionId}-${attemptId}`.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 120);
   return `agent:${safeAgent}:subagent:flowos-${suffix}`;
 }
