@@ -52,11 +52,12 @@ describe("gateway FlowGo identity repair", () => {
     } as const;
     let repairWs: WebSocket | undefined;
     let approvedReconnectWs: WebSocket | undefined;
+    let consumedHandoffWs: WebSocket | undefined;
 
     try {
       repairWs = await openTrackedWs(started.port);
       const repairAttempt = await connectReq(repairWs, {
-        token: "secret",
+        token: loaded.token,
         deviceIdentityPath: loaded.identityPath,
         client: flowGoClient,
         scopes: ["operator.read", "operator.write"],
@@ -103,7 +104,7 @@ describe("gateway FlowGo identity repair", () => {
 
       approvedReconnectWs = await openTrackedWs(started.port);
       const approvedReconnect = await connectReq(approvedReconnectWs, {
-        token: "secret",
+        token: loaded.token,
         deviceIdentityPath: loaded.identityPath,
         client: flowGoClient,
         scopes: ["operator.read", "operator.write"],
@@ -123,9 +124,22 @@ describe("gateway FlowGo identity repair", () => {
         modelIdentifier: "FlowGo",
       });
       expect(repaired?.tokens?.operator?.token).toBe(rotatedToken);
+
+      consumedHandoffWs = await openTrackedWs(started.port);
+      const consumedHandoff = await connectReq(consumedHandoffWs, {
+        token: loaded.token,
+        deviceIdentityPath: loaded.identityPath,
+        client: flowGoClient,
+        scopes: ["operator.read", "operator.write"],
+      });
+      expect(consumedHandoff.ok).toBe(false);
+      expect(
+        (consumedHandoff.error?.details as { authReason?: unknown } | undefined)?.authReason,
+      ).toBe("token_mismatch");
     } finally {
       repairWs?.close();
       approvedReconnectWs?.close();
+      consumedHandoffWs?.close();
       started.ws.close();
       await started.server.close();
       started.envSnapshot.restore();
