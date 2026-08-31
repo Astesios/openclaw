@@ -37,7 +37,7 @@ export function flowGoRequestedSessionIdMatchesOwnedEntry(params: {
 const FLOWGO_SESSION_MARKER = "flowgo-device";
 
 function clientClaimsFlowGoIdentity(client: GatewayClient): boolean {
-  if (!client.connect) {
+  if (!client.connect?.client) {
     return false;
   }
   return Boolean(
@@ -47,7 +47,7 @@ function clientClaimsFlowGoIdentity(client: GatewayClient): boolean {
       platform: client.connect.client.platform,
       deviceFamily: client.connect.client.deviceFamily,
       modelIdentifier: client.connect.client.modelIdentifier,
-      role: client.connect.role,
+      role: client.connect.role ?? "operator",
     }),
   );
 }
@@ -59,7 +59,9 @@ export async function resolveFlowGoCaller(client: GatewayClient | null): Promise
   }
   const device = await getPairedDevice(deviceId);
   if (!device) {
-    return { kind: "error", message: "paired device is no longer available" };
+    return clientClaimsFlowGoIdentity(client)
+      ? { kind: "error", message: "paired device is no longer available" }
+      : { kind: "unchanged" };
   }
   if (!projectFlowGoDevice(device)) {
     return clientClaimsFlowGoIdentity(client)

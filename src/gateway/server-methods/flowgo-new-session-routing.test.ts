@@ -4,15 +4,31 @@ import { agentHandlers } from "./agent.js";
 import { chatHandlers } from "./chat.js";
 import { sessionsHandlers } from "./sessions.js";
 import type { GatewayRequestHandlerOptions, RespondFn } from "./types.js";
+import { usageHandlers } from "./usage.js";
 
 const resolveFlowGoNewSessionRouteMock = vi.hoisted(() => vi.fn());
 const resolveFlowGoCallerMock = vi.hoisted(() => vi.fn());
 const authorizeFlowGoOwnedSessionMock = vi.hoisted(() => vi.fn());
+const loadCombinedSessionStoreForGatewayMock = vi.hoisted(() => vi.fn());
+const listSessionsFromStoreAsyncMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../flowgo-device-routing.js", () => ({
   authorizeFlowGoOwnedSession: authorizeFlowGoOwnedSessionMock,
   resolveFlowGoCaller: resolveFlowGoCallerMock,
   resolveFlowGoNewSessionRoute: resolveFlowGoNewSessionRouteMock,
+}));
+
+vi.mock("../session-utils.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../session-utils.js")>();
+  return {
+    ...actual,
+    loadCombinedSessionStoreForGateway: loadCombinedSessionStoreForGatewayMock,
+    listSessionsFromStoreAsync: listSessionsFromStoreAsyncMock,
+  };
+});
+
+vi.mock("./optional-model-catalog.js", () => ({
+  loadOptionalServerMethodModelCatalog: vi.fn(async () => []),
 }));
 
 function createOptions(
@@ -25,6 +41,7 @@ function createOptions(
     respond: vi.fn() as unknown as RespondFn,
     context: {
       getRuntimeConfig: () => ({ agents: { list: [{ id: "main" }, { id: "pet-agent" }] } }),
+      loadGatewayModelCatalog: async () => [],
     },
     client: null,
     isWebchatConnect: () => false,
@@ -38,6 +55,23 @@ describe("FlowGo new-session handler wiring", () => {
     authorizeFlowGoOwnedSessionMock.mockResolvedValue({
       kind: "allowed",
       deviceId: "flowgo-1",
+    });
+    loadCombinedSessionStoreForGatewayMock.mockReturnValue({
+      storePath: "/tmp/sessions.json",
+      store: {},
+    });
+    listSessionsFromStoreAsyncMock.mockImplementation(async ({ store }) => {
+      const sessions = Object.entries(store).map(([key, entry]) => Object.assign({ key }, entry));
+      return {
+        ts: 1,
+        path: "/tmp/sessions.json",
+        count: sessions.length,
+        totalCount: sessions.length,
+        limitApplied: 1,
+        hasMore: false,
+        defaults: {},
+        sessions,
+      };
     });
     resolveFlowGoNewSessionRouteMock.mockResolvedValue({
       kind: "error",
@@ -80,6 +114,14 @@ describe("FlowGo new-session handler wiring", () => {
       chatHandlers["chat.message.get"],
       { sessionKey: "agent:main:other", messageId: "message-1" },
     ],
+    ["chat.abort", chatHandlers["chat.abort"], { sessionKey: "agent:main:other" }],
+    ["sessions.usage", usageHandlers["sessions.usage"], { key: "agent:main:other" }],
+    [
+      "sessions.usage.timeseries",
+      usageHandlers["sessions.usage.timeseries"],
+      { key: "agent:main:other" },
+    ],
+    ["sessions.usage.logs", usageHandlers["sessions.usage.logs"], { key: "agent:main:other" }],
   ])(
     "rejects a FlowGo read through %s when the persisted owner differs",
     async (method, handler, params) => {
@@ -117,5 +159,61 @@ describe("FlowGo new-session handler wiring", () => {
       code: ErrorCodes.INVALID_REQUEST,
       message: "FlowGo session belongs to a different device",
     });
+  });
+
+  it("filters FlowGo sessions before list pagination and counts", async () => {
+    resolveFlowGoCallerMock.mockResolvedValue({ kind: "flowgo", deviceId: "flowgo-1" });
+    loadCombinedSessionStoreForGatewayMock.mockReturnValue({
+      storePath: "/tmp/sessions.json",
+      store: {
+        "agent:main:owned": {
+          sessionId: "owned-session",
+          updatedAt: 20,
+          flowGoOwnerDeviceId: "flowgo-1",
+        },
+        "agent:main:foreign": {
+          sessionId: "foreign-session",
+          updatedAt: 30,
+          flowGoOwnerDeviceId: "flowgo-2",
+        },
+      },
+    });
+    const opts = createOptions("sessions.list", { limit: 1, offset: 0 });
+
+    await sessionsHandlers["sessions.list"](opts);
+
+    expect(opts.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        count: 1,
+        totalCount: 1,
+        hasMore: false,
+        sessions: [expect.objectContaining({ key: "agent:main:owned" })],
+      }),
+      undefined,
+    );
+  });
+
+  it("does not aggregate unowned sessions for a FlowGo usage query without a key", async () => {
+    resolveFlowGoCallerMock.mockResolvedValue({ kind: "flowgo", deviceId: "flowgo-1" });
+    loadCombinedSessionStoreForGatewayMock.mockReturnValue({
+      storePath: "/tmp/sessions.json",
+      store: {
+        "agent:main:foreign": {
+          sessionId: "foreign-session",
+          updatedAt: 30,
+          flowGoOwnerDeviceId: "flowgo-2",
+        },
+      },
+    });
+    const opts = createOptions("sessions.usage", {});
+
+    await usageHandlers["sessions.usage"](opts);
+
+    expect(opts.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({ sessions: [], totals: expect.objectContaining({ totalCost: 0 }) }),
+      undefined,
+    );
   });
 });

@@ -915,12 +915,17 @@ async function handleSessionSend(params: {
   }
 }
 const rawSessionsHandlers: GatewayRequestHandlers = {
-  "sessions.list": async ({ params, respond, context }) => {
+  "sessions.list": async ({ params, respond, context, client }) => {
     if (!assertValidParams(params, validateSessionsListParams, "sessions.list", respond)) {
       return;
     }
     const p = params;
     const cfg = context.getRuntimeConfig();
+    const flowGoCaller = await resolveFlowGoCaller(client);
+    if (flowGoCaller.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoCaller.message));
+      return;
+    }
     const configuredAgentsOnly = p.configuredAgentsOnly === true;
     const payload = await measureDiagnosticsTimelineSpan(
       "gateway.sessions.list",
@@ -940,9 +945,17 @@ const rawSessionsHandlers: GatewayRequestHandlers = {
             },
           },
         );
-        const listStore = configuredAgentsOnly
+        const configuredStore = configuredAgentsOnly
           ? filterSessionStoreToConfiguredAgents(cfg, store)
           : store;
+        const listStore =
+          flowGoCaller.kind === "flowgo"
+            ? Object.fromEntries(
+                Object.entries(configuredStore).filter(
+                  ([, entry]) => entry?.flowGoOwnerDeviceId === flowGoCaller.deviceId,
+                ),
+              )
+            : configuredStore;
         const modelCatalog = await measureDiagnosticsTimelineSpan(
           "gateway.sessions.list.model_catalog",
           () => loadOptionalServerMethodModelCatalog(context, "sessions.list"),
@@ -2916,34 +2929,7 @@ export const sessionsHandlers: GatewayRequestHandlers = Object.fromEntries(
       if (!(await authorizeFlowGoSessionsRequest(method, opts))) {
         return;
       }
-      if (method !== "sessions.list") {
-        await handler(opts);
-        return;
-      }
-      const caller = await resolveFlowGoCaller(opts.client);
-      if (caller.kind !== "flowgo") {
-        await handler(opts);
-        return;
-      }
-      await handler({
-        ...opts,
-        respond: (ok, payload, error, meta) => {
-          if (!ok || !payload || typeof payload !== "object") {
-            opts.respond(ok, payload, error, meta);
-            return;
-          }
-          const result = payload as { sessions?: Array<{ key?: string }> };
-          const sessions = Array.isArray(result.sessions)
-            ? result.sessions.filter((session) => {
-                const key = normalizeOptionalString(session.key);
-                return key
-                  ? loadSessionEntry(key).entry?.flowGoOwnerDeviceId === caller.deviceId
-                  : false;
-              })
-            : [];
-          opts.respond(true, { ...result, sessions }, error, meta);
-        },
-      });
+      await handler(opts);
     },
   ]),
 );

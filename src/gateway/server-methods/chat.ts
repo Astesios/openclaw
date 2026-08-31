@@ -3027,6 +3027,18 @@ export const chatHandlers: GatewayRequestHandlers = {
     const canonicalAbortSessionKey =
       abortAgentId && abortSessionResolvesGlobal ? "global" : resolvedAbortSessionKey;
 
+    const abortEntry = loadSessionEntry(canonicalAbortSessionKey, {
+      agentId: abortAgentId,
+    }).entry;
+    const flowGoAccess = await authorizeFlowGoOwnedSession({
+      client,
+      ownerDeviceId: abortEntry?.flowGoOwnerDeviceId,
+    });
+    if (flowGoAccess.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoAccess.message));
+      return;
+    }
+
     const ops = createChatAbortOps(context);
     const requester = resolveChatAbortRequester(client);
 
