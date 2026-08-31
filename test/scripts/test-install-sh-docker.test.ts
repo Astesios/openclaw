@@ -1,13 +1,6 @@
 // Test Install Sh Docker tests cover test install sh docker script behavior.
 import { spawn, spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -32,6 +25,7 @@ const BUN_GLOBAL_ASSERTIONS_PATH = "scripts/e2e/lib/bun-global-install/assertion
 const INSTALL_SMOKE_WORKFLOW_PATH = ".github/workflows/install-smoke.yml";
 const RELEASE_CHECKS_WORKFLOW_PATH = ".github/workflows/openclaw-release-checks.yml";
 const LIVE_E2E_WORKFLOW_PATH = ".github/workflows/openclaw-live-and-e2e-checks-reusable.yml";
+const FLOAI_IMAGE_WORKFLOW_PATH = ".github/workflows/floai-image.yml";
 const tempDirs = createTempDirTracker();
 
 afterEach(() => {
@@ -460,6 +454,18 @@ describe("test-install-sh-docker", () => {
     expect(dockerfile).toContain(
       "node /app/node_modules/playwright-core/cli.js install --with-deps chromium",
     );
+    expect(dockerfile).toContain('require("playwright-core").chromium.executablePath()');
+    expect(dockerfile).toContain('ln -sf "$chromium_path" /usr/local/bin/chromium');
+    expect(dockerfile).toContain('ln -sf "$chromium_path" /usr/local/bin/flowos-qa-chromium');
+  });
+
+  it("bakes and smoke-tests Chromium in the FlowOS image workflow", () => {
+    const workflow = readFileSync(FLOAI_IMAGE_WORKFLOW_PATH, "utf8");
+
+    expect(workflow).toContain("OPENCLAW_INSTALL_BROWSER=1");
+    expect(workflow).toContain("校验 FlowOS QA Chromium");
+    expect(workflow).toContain("/usr/local/bin/flowos-qa-chromium --version");
+    expect(workflow).toContain("/json/version");
   });
 
   it("passes the baked browser build arg through Docker setup", () => {

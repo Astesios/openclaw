@@ -265,6 +265,10 @@ RUN --mount=type=cache,id=openclaw-bookworm-apt-cache,target=/var/cache/apt,shar
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb && \
       mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" && \
       node /app/node_modules/playwright-core/cli.js install --with-deps chromium && \
+      chromium_path="$(node -e 'process.stdout.write(require("playwright-core").chromium.executablePath())')" && \
+      test -x "$chromium_path" && \
+      ln -sf "$chromium_path" /usr/local/bin/chromium && \
+      ln -sf "$chromium_path" /usr/local/bin/flowos-qa-chromium && \
       chown -R node:node "$PLAYWRIGHT_BROWSERS_PATH"; \
     fi
 
