@@ -11,9 +11,6 @@ on:
         required: true
         default: floai
 
-env:
-  IMAGE: ghcr.io/xingguo0127/openclaw
-
 jobs:
   # ── 每个架构在各自原生 runner 上 build，按 digest 推（不带 tag）──
   build:
@@ -32,6 +29,11 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: 生成小写 GHCR 镜像名
+        run: |
+          IMAGE_OWNER="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=ghcr.io/${IMAGE_OWNER}/openclaw" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
@@ -41,7 +43,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+          password: ${{ secrets.GHCR_PAT || github.token }}
 
       # default variant build；OPENCLAW_EXTENSIONS 保留 floai 自建能力依赖的插件。
       # ★ qwen 必须显式保留:根 package.json 的 files 里有 `!dist/extensions/qwen/**`
@@ -146,6 +148,11 @@ jobs:
     env:
       JCR_REGISTRY: ${{ secrets.JCR_REGISTRY }} # 京东云端点（空则跳过 JCR）；仓库直接挂注册表下，无额外命名空间
     steps:
+      - name: 生成小写 GHCR 镜像名
+        run: |
+          IMAGE_OWNER="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE=ghcr.io/${IMAGE_OWNER}/openclaw" >> "$GITHUB_ENV"
+
       - uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
@@ -159,7 +166,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+          password: ${{ secrets.GHCR_PAT || github.token }}
 
       - name: 合并成多架构 manifest
         working-directory: /tmp/digests

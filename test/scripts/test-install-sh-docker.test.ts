@@ -462,6 +462,10 @@ describe("test-install-sh-docker", () => {
   it("bakes and smoke-tests Chromium in the FlowOS image workflow", () => {
     const workflow = readFileSync(FLOAI_IMAGE_WORKFLOW_PATH, "utf8");
 
+    expect(workflow.match(/IMAGE_OWNER=/gu)).toHaveLength(2);
+    expect(workflow.match(/tr '\[:upper:\]' '\[:lower:\]'/gu)).toHaveLength(2);
+    expect(workflow.match(/IMAGE=ghcr\.io\/\$\{IMAGE_OWNER\}\/openclaw/gu)).toHaveLength(2);
+    expect(workflow).toContain("secrets.GHCR_PAT || github.token");
     expect(workflow).toContain("OPENCLAW_INSTALL_BROWSER=1");
     expect(workflow).toContain("校验 FlowOS QA Chromium");
     expect(workflow).toContain("/usr/local/bin/flowos-qa-chromium --version");
