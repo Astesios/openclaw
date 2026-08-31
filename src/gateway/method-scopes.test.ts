@@ -55,6 +55,7 @@ describe("method scope resolution", () => {
     ["environments.status", ["operator.read"]],
     ["diagnostics.stability", ["operator.read"]],
     ["node.pair.approve", ["operator.pairing"]],
+    ["device.agent.bind", ["operator.pairing"]],
     ["poll", ["operator.write"]],
     ["talk.client.create", ["operator.write"]],
     ["talk.client.toolCall", ["operator.write"]],
@@ -288,6 +289,16 @@ describe("operator scope authorization", () => {
       allowed: true,
     });
     expect(authorizeOperatorScopesForMethod("node.pair.approve", ["operator.write"])).toEqual({
+      allowed: false,
+      missingScope: "operator.pairing",
+    });
+  });
+
+  it("requires pairing scope for device Agent binding", () => {
+    expect(authorizeOperatorScopesForMethod("device.agent.bind", ["operator.pairing"])).toEqual({
+      allowed: true,
+    });
+    expect(authorizeOperatorScopesForMethod("device.agent.bind", ["operator.write"])).toEqual({
       allowed: false,
       missingScope: "operator.pairing",
     });

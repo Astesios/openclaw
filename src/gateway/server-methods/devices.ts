@@ -1,8 +1,9 @@
-// Gateway RPC handlers for device pairing and device-token lifecycle operations.
+import { createHash } from "node:crypto";
 import {
   ErrorCodes,
   errorShape,
   formatValidationErrors,
+  validateDeviceAgentBindParams,
   validateDevicePairApproveParams,
   validateDevicePairListParams,
   validateDevicePairRemoveParams,
@@ -10,22 +11,28 @@ import {
   validateDeviceTokenRevokeParams,
   validateDeviceTokenRotateParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+// Gateway RPC handlers for device pairing and device-token lifecycle operations.
+import { listAgentIds, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   approveDevicePairing,
+  bindFlowGoDeviceAgent,
   formatDevicePairingForbiddenMessage,
   getPairedDevice,
   getPendingDevicePairing,
   listDevicePairing,
+  projectFlowGoDevice,
   removePairedDevice,
-  type DeviceAuthToken,
   type RevokeDeviceTokenDenyReason,
   type RotateDeviceTokenDenyReason,
   rejectDevicePairing,
   revokeDeviceToken,
   rotateDeviceToken,
   summarizeDeviceTokens,
+  type DevicePairingPendingRequest,
+  type PairedDevice,
 } from "../../infra/device-pairing.js";
 import type { DiagnosticSecurityEventInput } from "../../infra/diagnostic-events.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
 import {
   deniesCrossDeviceManagement,
   deniesDeviceTokenRoleManagement,
@@ -46,16 +53,47 @@ type DeviceSessionAuthz = ReturnType<typeof resolveDeviceSessionAuthz>;
 const DEVICE_PAIR_APPROVAL_DENIED_MESSAGE = "device pairing approval denied";
 const DEVICE_PAIR_REJECTION_DENIED_MESSAGE = "device pairing rejection denied";
 
-function redactPairedDevice(
-  device: { tokens?: Record<string, DeviceAuthToken> } & Record<string, unknown>,
-) {
-  // Pairing lists are visible to operators; expose token lifecycle metadata
-  // without returning raw token material or the internal approved-scope set.
-  const { tokens, approvedScopes: _approvedScopes, ...rest } = device;
+function redactPendingDevice(device: DevicePairingPendingRequest) {
+  const { publicKey: _publicKey, ...rest } = device;
+  return {
+    ...rest,
+    identityFingerprint: `sha256:${createHash("sha256").update(device.publicKey).digest("hex")}`,
+  };
+}
+
+function redactPairedDevice(params: {
+  device: PairedDevice;
+  agentIds: readonly string[];
+  defaultAgentId: string;
+}) {
+  const { publicKey: _publicKey, tokens, approvedScopes: _approvedScopes, ...rest } = params.device;
+  const projection = projectFlowGoDevice(params.device);
+  if (!projection) {
+    return {
+      ...rest,
+      tokens: summarizeDeviceTokens(tokens),
+    };
+  }
+  const rawBoundAgentId = params.device.boundAgentId;
+  const boundAgentId = typeof rawBoundAgentId === "string" ? rawBoundAgentId.trim() : "";
+  const candidateAgentId = boundAgentId || params.defaultAgentId;
+  const agentAvailable = params.agentIds.includes(candidateAgentId);
+  const rawRevision = params.device.bindingRevision;
+  const bindingRevision =
+    Number.isSafeInteger(rawRevision) && Number(rawRevision) >= 0 ? Number(rawRevision) : 0;
   return {
     ...rest,
     tokens: summarizeDeviceTokens(tokens),
+    ...projection,
+    ...(boundAgentId ? { boundAgentId } : {}),
+    ...(agentAvailable ? { effectiveAgentId: candidateAgentId } : {}),
+    agentAvailability: agentAvailable ? "available" : "unavailable",
+    bindingRevision,
   };
+}
+
+function deniesFlowGoAgentBinding(authz: DeviceManagementAuthz): boolean {
+  return !authz.isAdminCaller;
 }
 
 function logDeviceTokenRotationDenied(params: {
@@ -132,6 +170,36 @@ function emitDevicePairingDeniedSecurityEvent(params: {
   });
 }
 
+function emitFlowGoBindingSecurityEvent(params: {
+  authz: DeviceSessionAuthz;
+  targetDeviceId: string;
+  outcome: "success" | "denied";
+  decision: "allow" | "deny";
+  reason?: string;
+  previousAgentId?: string;
+  requestedAgentId: string;
+  expectedRevision: number;
+  bindingRevision?: number;
+}) {
+  emitDeviceSecurityEvent({
+    action: "device.agent.binding",
+    outcome: params.outcome,
+    severity: params.outcome === "success" ? "low" : "medium",
+    authz: params.authz,
+    targetDeviceId: params.targetDeviceId,
+    policyId: "gateway.flowgo-agent-binding",
+    decision: params.decision,
+    controlId: "device.agent.bind",
+    reason: params.reason,
+    attributes: {
+      requested_agent_id: params.requestedAgentId,
+      expected_revision: params.expectedRevision,
+      ...(params.previousAgentId ? { previous_agent_id: params.previousAgentId } : {}),
+      ...(params.bindingRevision !== undefined ? { binding_revision: params.bindingRevision } : {}),
+    },
+  });
+}
+
 function emitDevicePairingLifecycleSecurityEvent(params: {
   action: "device.pairing.approved" | "device.pairing.rejected" | "device.pairing.removed";
   severity: DiagnosticSecurityEventInput["severity"];
@@ -202,7 +270,7 @@ function emitDeviceTokenLifecycleSecurityEvent(params: {
 
 /** Gateway request handlers for device pair approval, removal, token rotation, and revocation. */
 export const deviceHandlers: GatewayRequestHandlers = {
-  "device.pair.list": async ({ params, respond, client }) => {
+  "device.pair.list": async ({ params, respond, client, context }) => {
     if (!validateDevicePairListParams(params)) {
       respond(
         false,
@@ -217,6 +285,9 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const list = await listDevicePairing();
+    const cfg = context.getRuntimeConfig();
+    const agentIds = listAgentIds(cfg);
+    const defaultAgentId = normalizeAgentId(resolveDefaultAgentId(cfg));
     const authz = resolveDeviceSessionAuthz(client);
     const visibleList =
       authz.callerDeviceId && !authz.isAdminCaller
@@ -230,8 +301,10 @@ export const deviceHandlers: GatewayRequestHandlers = {
     respond(
       true,
       {
-        pending: visibleList.pending,
-        paired: visibleList.paired.map((device) => redactPairedDevice(device)),
+        pending: visibleList.pending.map((device) => redactPendingDevice(device)),
+        paired: visibleList.paired.map((device) =>
+          redactPairedDevice({ device, agentIds, defaultAgentId }),
+        ),
       },
       undefined,
     );
@@ -339,7 +412,19 @@ export const deviceHandlers: GatewayRequestHandlers = {
       },
       { dropIfSlow: true },
     );
-    respond(true, { requestId, device: redactPairedDevice(approved.device) }, undefined);
+    const cfg = context.getRuntimeConfig();
+    respond(
+      true,
+      {
+        requestId,
+        device: redactPairedDevice({
+          device: approved.device,
+          agentIds: listAgentIds(cfg),
+          defaultAgentId: normalizeAgentId(resolveDefaultAgentId(cfg)),
+        }),
+      },
+      undefined,
+    );
   },
   "device.pair.reject": async ({ params, respond, context, client }) => {
     if (!validateDevicePairRejectParams(params)) {
@@ -486,6 +571,110 @@ export const deviceHandlers: GatewayRequestHandlers = {
     queueMicrotask(() => {
       context.disconnectClientsForDevice?.(removed.deviceId);
     });
+  },
+  "device.agent.bind": async ({ params, respond, context, client }) => {
+    if (!validateDeviceAgentBindParams(params)) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          `invalid device.agent.bind params: ${formatValidationErrors(
+            validateDeviceAgentBindParams.errors,
+          )}`,
+        ),
+      );
+      return;
+    }
+    const {
+      deviceId,
+      agentId: rawAgentId,
+      expectedRevision,
+    } = params as {
+      deviceId: string;
+      agentId: string;
+      expectedRevision: number;
+    };
+    const authz = resolveDeviceManagementAuthz(client, deviceId);
+    if (deniesFlowGoAgentBinding(authz)) {
+      context.logGateway.warn(
+        `device agent binding denied device=${deviceId} reason=operator-admin-required`,
+      );
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: "operator-admin-required",
+        requestedAgentId: normalizeAgentId(rawAgentId),
+        expectedRevision,
+      });
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "device agent binding denied"),
+      );
+      return;
+    }
+    const agentId = normalizeAgentId(rawAgentId);
+    if (!listAgentIds(context.getRuntimeConfig()).includes(agentId)) {
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: "unknown-agent",
+        requestedAgentId: agentId,
+        expectedRevision,
+      });
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown agentId"));
+      return;
+    }
+    const result = await bindFlowGoDeviceAgent({ deviceId, agentId, expectedRevision });
+    if (!result.ok) {
+      const message =
+        result.reason === "unknown-device"
+          ? "unknown deviceId"
+          : result.reason === "not-flowgo"
+            ? "device is not FlowGo"
+            : `device agent binding revision conflict: current revision ${result.bindingRevision}`;
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: result.reason,
+        requestedAgentId: agentId,
+        expectedRevision,
+        bindingRevision: result.bindingRevision,
+      });
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, message));
+      return;
+    }
+    context.logGateway.info(
+      `device agent binding updated device=${result.deviceId} oldAgent=${result.previousBoundAgentId ?? "<default>"} newAgent=${result.boundAgentId} revision=${result.bindingRevision}`,
+    );
+    emitFlowGoBindingSecurityEvent({
+      authz,
+      targetDeviceId: result.deviceId,
+      outcome: "success",
+      decision: "allow",
+      requestedAgentId: result.boundAgentId,
+      previousAgentId: result.previousBoundAgentId,
+      expectedRevision,
+      bindingRevision: result.bindingRevision,
+    });
+    respond(
+      true,
+      {
+        deviceId: result.deviceId,
+        boundAgentId: result.boundAgentId,
+        effectiveAgentId: result.boundAgentId,
+        agentAvailability: "available",
+        bindingRevision: result.bindingRevision,
+      },
+      undefined,
+    );
   },
   "device.token.rotate": async ({ params, respond, context, client }) => {
     if (!validateDeviceTokenRotateParams(params)) {

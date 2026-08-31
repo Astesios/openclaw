@@ -29,6 +29,16 @@ export const DevicePairRemoveParamsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** Binds a paired FlowGo device to an Agent using optimistic concurrency. */
+export const DeviceAgentBindParamsSchema = Type.Object(
+  {
+    deviceId: NonEmptyString,
+    agentId: NonEmptyString,
+    expectedRevision: Type.Integer({ minimum: 0 }),
+  },
+  { additionalProperties: false },
+);
+
 /** Rotates or issues a device token for a specific role/scope grant. */
 export const DeviceTokenRotateParamsSchema = Type.Object(
   {
@@ -57,6 +67,7 @@ export const DevicePairRequestedEventSchema = Type.Object(
     displayName: Type.Optional(NonEmptyString),
     platform: Type.Optional(NonEmptyString),
     deviceFamily: Type.Optional(NonEmptyString),
+    modelIdentifier: Type.Optional(NonEmptyString),
     clientId: Type.Optional(NonEmptyString),
     clientMode: Type.Optional(NonEmptyString),
     role: Type.Optional(NonEmptyString),

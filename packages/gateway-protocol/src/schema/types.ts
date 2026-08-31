@@ -67,6 +67,8 @@ export type NodePendingEnqueueResult = SchemaType<"NodePendingEnqueueResult">;
 export type PushTestParams = SchemaType<"PushTestParams">;
 export type PushTestResult = SchemaType<"PushTestResult">;
 
+export type DeviceAgentBindParams = SchemaType<"DeviceAgentBindParams">;
+
 /** Session lifecycle, message routing, compaction, patch, and usage payloads. */
 export type SessionsListParams = SchemaType<"SessionsListParams">;
 export type SessionsCleanupParams = SchemaType<"SessionsCleanupParams">;

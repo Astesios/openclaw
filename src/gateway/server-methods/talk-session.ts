@@ -26,7 +26,9 @@ import {
 } from "../../talk/flowgo-expression-tool.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
 import type { TalkBrain, TalkMode, TalkTransport } from "../../talk/talk-events.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
+import { loadSessionEntry } from "../session-utils.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
 import {
   cancelTalkHandoffTurn,
@@ -218,6 +220,25 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
     const mode = normalizeTalkSessionMode(params);
     const transport = normalizeTalkSessionTransport({ mode, transport: params.transport });
     const brain = normalizeTalkSessionBrain({ mode, brain: params.brain });
+    let routedSessionKey = normalizeOptionalString(params.sessionKey);
+
+    if (mode === "realtime" && transport === "gateway-relay" && brain === "agent-consult") {
+      const runtimeConfig = context.getRuntimeConfig();
+      const existingEntry = routedSessionKey ? loadSessionEntry(routedSessionKey).entry : undefined;
+      const flowGoRoute = await resolveFlowGoNewSessionRoute({
+        client,
+        cfg: runtimeConfig,
+        existingSessionOwnerDeviceId: existingEntry?.flowGoOwnerDeviceId,
+        requestedSessionKey: routedSessionKey,
+      });
+      if (flowGoRoute.kind === "error") {
+        respondInvalidRequest(respond, flowGoRoute.message);
+        return;
+      }
+      if (flowGoRoute.kind === "route") {
+        routedSessionKey = flowGoRoute.sessionKey;
+      }
+    }
 
     if (transport === "webrtc" || transport === "provider-websocket") {
       respondInvalidRequest(
@@ -364,7 +385,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
           // 故 force 时**不给任何工具**,qwen 只管念强制转交回来的结果;停/改这类由 DeepSeek 逐轮处理。
           tools,
           model: effectiveModel,
-          sessionKey: normalizeOptionalString(params.sessionKey),
+          sessionKey: routedSessionKey,
           voice: launchOptions.voice,
           forceAgentConsultOnFinalTranscript: forceAgentConsult,
         });
@@ -376,6 +397,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
         respondOk(respond, {
           ...session,
           sessionId: session.relaySessionId,
+          ...(routedSessionKey ? { sessionKey: routedSessionKey } : {}),
           mode,
           brain,
           negotiatedCapabilities,
