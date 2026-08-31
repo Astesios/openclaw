@@ -80,6 +80,7 @@ function createOptions(
       broadcast: vi.fn(),
       disconnectClientsForDevice: vi.fn(),
       invalidateClientsForDevice: vi.fn(),
+      getRuntimeConfig: () => ({ agents: { list: [{ id: "main" }, { id: "pet-agent" }] } }),
       logGateway: {
         debug: vi.fn(),
         error: vi.fn(),
@@ -1179,7 +1180,6 @@ describe("deviceHandlers", () => {
         requestId: "req-1",
         device: {
           deviceId: "device-2",
-          publicKey: "pk-2",
           role: "operator",
           roles: ["operator"],
           approvedAtMs: 100,

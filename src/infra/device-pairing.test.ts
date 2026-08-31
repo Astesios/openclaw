@@ -7,6 +7,7 @@ import { issueDeviceBootstrapToken, verifyDeviceBootstrapToken } from "./device-
 import {
   approveBootstrapDevicePairing,
   approveDevicePairing,
+  bindFlowGoDeviceAgent,
   ensureDeviceToken,
   getPairedDevice,
   hasEffectivePairedDeviceRole,
@@ -66,6 +67,28 @@ async function setupPairedBrowserOperatorDevice(baseDir: string) {
   await approveDevicePairing(
     request.request.requestId,
     { callerScopes: ["operator.read"] },
+    baseDir,
+  );
+}
+
+async function setupPairedFlowGoDevice(baseDir: string) {
+  const request = await requestDevicePairing(
+    {
+      deviceId: "flowgo-1",
+      publicKey: "public-key-flowgo-1",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      clientId: "openclaw-pet",
+      clientMode: "ui",
+      role: "operator",
+      scopes: ["operator.write"],
+    },
+    baseDir,
+  );
+  await approveDevicePairing(
+    request.request.requestId,
+    { callerScopes: ["operator.write"] },
     baseDir,
   );
 }

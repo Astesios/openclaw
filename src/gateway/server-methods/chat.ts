@@ -62,6 +62,7 @@ import type { MsgContext, TemplateContext } from "../../auto-reply/templating.js
 import {
   resolveAndPersistSessionFile,
   resolveSessionFilePath,
+  updateSessionStore,
   updateSessionStoreEntry,
 } from "../../config/sessions.js";
 import { resolveMirroredTranscriptText } from "../../config/sessions/transcript-mirror.js";
@@ -3222,17 +3223,17 @@ export const chatHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const rawSessionKey = p.sessionKey;
+    let rawSessionKey = p.sessionKey;
     const agentIdOverride = normalizeOptionalText(p.agentId);
     const clientRunId = p.idempotencyKey;
-    const requestedAgentId = resolveRequestedChatAgentId({
+    let requestedAgentId = resolveRequestedChatAgentId({
       cfg: (context as { getRuntimeConfig?: () => OpenClawConfig }).getRuntimeConfig?.(),
       requestedSessionKey: rawSessionKey,
       agentId: agentIdOverride,
     });
     const sessionLoadOptions = requestedAgentId ? { agentId: requestedAgentId } : undefined;
     const sessionLoadStartedAtMs = performance.now();
-    const sessionLoadResult = measureDiagnosticsTimelineSpanSync(
+    let sessionLoadResult = measureDiagnosticsTimelineSpanSync(
       "gateway.chat_send.load_session",
       () => loadSessionEntry(rawSessionKey, sessionLoadOptions),
       {
@@ -3244,8 +3245,24 @@ export const chatHandlers: GatewayRequestHandlers = {
         },
       },
     );
+    const flowGoRoute = await resolveFlowGoNewSessionRoute({
+      client,
+      cfg: sessionLoadResult.cfg,
+      existingSessionOwnerDeviceId: sessionLoadResult.entry?.flowGoOwnerDeviceId,
+      requestedAgentId: agentIdOverride,
+      requestedSessionKey: rawSessionKey,
+    });
+    if (flowGoRoute.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+      return;
+    }
+    if (flowGoRoute.kind === "route") {
+      rawSessionKey = flowGoRoute.sessionKey ?? rawSessionKey;
+      requestedAgentId = flowGoRoute.agentId;
+      sessionLoadResult = loadSessionEntry(rawSessionKey, { agentId: requestedAgentId });
+    }
     const sessionLoadMs = roundedChatSendTimingMs(performance.now() - sessionLoadStartedAtMs);
-    const { cfg, entry, canonicalKey: sessionKey, legacyKey } = sessionLoadResult;
+    const { cfg, entry, canonicalKey: sessionKey, legacyKey, storePath } = sessionLoadResult;
     const selectedAgent = validateChatSelectedAgent({
       cfg,
       requestedSessionKey: rawSessionKey,
@@ -3256,7 +3273,28 @@ export const chatHandlers: GatewayRequestHandlers = {
       return;
     }
     const requestedSessionId = normalizeOptionalText(p.sessionId);
-    const backingSessionId = entry?.sessionId ?? requestedSessionId;
+    const flowGoOwnedEntrySessionId =
+      flowGoRoute.kind === "route" && entry?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId
+        ? entry.sessionId
+        : undefined;
+    if (
+      !flowGoRequestedSessionIdMatchesOwnedEntry({
+        route: flowGoRoute,
+        requestedSessionId,
+        ownedEntrySessionId: flowGoOwnedEntrySessionId,
+      })
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo sessionId does not match its owned session"),
+      );
+      return;
+    }
+    let backingSessionId =
+      flowGoRoute.kind === "route"
+        ? (flowGoOwnedEntrySessionId ?? randomUUID())
+        : (entry?.sessionId ?? requestedSessionId);
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey, entry, {
       acpMetadataSessionKey: legacyKey ?? sessionKey,
     });
@@ -3297,6 +3335,45 @@ export const chatHandlers: GatewayRequestHandlers = {
       overrideMs: p.timeoutMs,
     });
     const now = Date.now();
+    if (flowGoRoute.kind === "route") {
+      let ownershipConflict = false;
+      const ownedEntry = await updateSessionStore(storePath, (store) => {
+        const existing = store[sessionKey];
+        if (
+          existing?.flowGoOwnerDeviceId &&
+          existing.flowGoOwnerDeviceId !== flowGoRoute.ownerDeviceId
+        ) {
+          ownershipConflict = true;
+          return existing;
+        }
+        if (existing?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId) {
+          const next = {
+            ...existing,
+            sessionId: existing.sessionId ?? backingSessionId,
+            updatedAt: Math.max(existing.updatedAt ?? 0, now),
+            flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
+          };
+          store[sessionKey] = next;
+          return next;
+        }
+        const next = {
+          sessionId: backingSessionId,
+          updatedAt: now,
+          flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
+        };
+        store[sessionKey] = next;
+        return next;
+      });
+      if (ownershipConflict) {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo session belongs to a different device"),
+        );
+        return;
+      }
+      backingSessionId = ownedEntry.sessionId;
+    }
 
     const sendPolicy = resolveSendPolicy({
       cfg,

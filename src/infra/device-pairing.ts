@@ -112,16 +112,29 @@ export type PairedDevice = {
   bindingRevision?: number;
 };
 
+export type FlowGoDeviceProjection = {
+  deviceType: "pet";
+  deviceModel: "flowgo";
+};
+
+export type BindFlowGoDeviceAgentResult =
+  | {
+      ok: true;
+      deviceId: string;
+      previousBoundAgentId?: string;
+      boundAgentId: string;
+      bindingRevision: number;
+    }
+  | {
+      ok: false;
+      reason: "unknown-device" | "not-flowgo" | "revision-conflict";
+      bindingRevision?: number;
+    };
+
 /** Metadata fields a device may refresh without changing approval or token state. */
 export type PairedDeviceMetadataPatch = Pick<
   PairedDevice,
-  | "displayName"
-  | "platform"
-  | "clientId"
-  | "clientMode"
-  | "remoteIp"
-  | "lastSeenAtMs"
-  | "lastSeenReason"
+  "displayName" | "platform" | "remoteIp" | "lastSeenAtMs" | "lastSeenReason"
 >;
 
 /** Paired-device access metadata refreshed when an existing device reconnects. */
@@ -520,6 +533,7 @@ function buildApprovedPairedDevice(params: {
     displayName: params.accessMetadata?.displayName ?? params.pending.displayName,
     platform: params.pending.platform,
     deviceFamily: params.pending.deviceFamily,
+    modelIdentifier: params.pending.modelIdentifier,
     clientId: params.pending.clientId,
     clientMode: params.pending.clientMode,
     role: params.pending.role,
@@ -532,6 +546,8 @@ function buildApprovedPairedDevice(params: {
     approvedAtMs: params.now,
     lastSeenAtMs: params.accessMetadata?.lastSeenAtMs ?? params.existing?.lastSeenAtMs,
     lastSeenReason: params.accessMetadata?.lastSeenReason ?? params.existing?.lastSeenReason,
+    boundAgentId: params.existing?.boundAgentId,
+    bindingRevision: params.existing?.bindingRevision,
   };
 }
 
@@ -1027,6 +1043,45 @@ export async function removePairedDeviceRole(params: {
   });
 }
 
+export async function bindFlowGoDeviceAgent(params: {
+  deviceId: string;
+  agentId: string;
+  expectedRevision: number;
+  baseDir?: string;
+}): Promise<BindFlowGoDeviceAgentResult> {
+  return await withLock(async () => {
+    const state = await loadState(params.baseDir);
+    const deviceId = normalizeDeviceId(params.deviceId);
+    const device = state.pairedByDeviceId[deviceId];
+    if (!device) {
+      return { ok: false, reason: "unknown-device" };
+    }
+    if (!projectFlowGoDevice(device)) {
+      return { ok: false, reason: "not-flowgo" };
+    }
+    const bindingRevision = normalizeBindingRevision(device.bindingRevision);
+    if (params.expectedRevision !== bindingRevision) {
+      return { ok: false, reason: "revision-conflict", bindingRevision };
+    }
+    const previousBoundAgentId = normalizeRole(device.boundAgentId) ?? undefined;
+    const boundAgentId = params.agentId.trim();
+    const nextRevision = bindingRevision + 1;
+    state.pairedByDeviceId[deviceId] = {
+      ...device,
+      boundAgentId,
+      bindingRevision: nextRevision,
+    };
+    await persistState(state, params.baseDir, "paired");
+    return {
+      ok: true,
+      deviceId,
+      previousBoundAgentId,
+      boundAgentId,
+      bindingRevision: nextRevision,
+    };
+  });
+}
+
 /** Update non-auth metadata for a paired device presence/status refresh. */
 export async function updatePairedDeviceMetadata(
   deviceId: string,
@@ -1046,12 +1101,6 @@ export async function updatePairedDeviceMetadata(
     }
     if ("platform" in patch) {
       next.platform = patch.platform;
-    }
-    if ("clientId" in patch) {
-      next.clientId = patch.clientId;
-    }
-    if ("clientMode" in patch) {
-      next.clientMode = patch.clientMode;
     }
     if ("remoteIp" in patch) {
       next.remoteIp = patch.remoteIp;

@@ -1510,11 +1510,16 @@ export const agentHandlers: GatewayRequestHandlers = {
     const flowGoSessionEntry = requestedSessionKey
       ? loadSessionEntry(requestedSessionKey).entry
       : undefined;
+    const flowGoOwnedEntrySessionId =
+      flowGoRoute.kind === "route" &&
+      flowGoSessionEntry?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId
+        ? flowGoSessionEntry.sessionId
+        : undefined;
     if (
       !flowGoRequestedSessionIdMatchesOwnedEntry({
         route: flowGoRoute,
         requestedSessionId,
-        ownedEntrySessionId: flowGoSessionEntry?.sessionId,
+        ownedEntrySessionId: flowGoOwnedEntrySessionId,
       })
     ) {
       respond(
@@ -1947,6 +1952,8 @@ export const agentHandlers: GatewayRequestHandlers = {
           : false;
         const canReuseSession =
           Boolean(entry?.sessionId) &&
+          (flowGoRoute.kind !== "route" ||
+            entry?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId) &&
           (freshness?.fresh ?? false) &&
           !failedSessionTranscriptMissing &&
           !terminalMainTranscriptNewerThanRegistry;
@@ -2100,6 +2107,8 @@ export const agentHandlers: GatewayRequestHandlers = {
             resolveFailedSessionTranscriptMissingForEntry(freshEntry);
           const freshCanReuseSession =
             Boolean(freshEntry?.sessionId) &&
+            (flowGoRoute.kind !== "route" ||
+              freshEntry?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId) &&
             (freshFreshness?.fresh ?? false) &&
             !freshFailedSessionTranscriptMissing &&
             !freshTerminalMainTranscriptNewerThanRegistry;
@@ -2152,6 +2161,9 @@ export const agentHandlers: GatewayRequestHandlers = {
             groupChannel: nextGroup.groupChannel,
             space: nextGroup.groupSpace,
             ...(pluginOwnerId ? { pluginOwnerId } : {}),
+            ...(flowGoRoute.kind === "route"
+              ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId }
+              : {}),
             ...(shouldClearRotatedState
               ? {
                   status: undefined,

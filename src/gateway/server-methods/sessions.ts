@@ -83,6 +83,7 @@ import {
   resolveAgentIdFromSessionKey,
   toAgentStoreSessionKey,
 } from "../../routing/session-key.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveSessionKeyForRun } from "../server-session-key.js";
 import {
@@ -1350,14 +1351,18 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         resolveDefaultAgentId(cfg),
     );
     if (requestedKey) {
-      const requestedAgentId = parseAgentSessionKey(requestedKey)?.agentId;
-      if (requestedAgentId && requestedAgentId !== agentId && normalizeOptionalString(p.agentId)) {
+      const requestedKeyAgentId = parseAgentSessionKey(requestedKey)?.agentId;
+      if (
+        requestedKeyAgentId &&
+        requestedKeyAgentId !== agentId &&
+        normalizeOptionalString(p.agentId)
+      ) {
         respond(
           false,
           undefined,
           errorShape(
             ErrorCodes.INVALID_REQUEST,
-            `sessions.create key agent (${requestedAgentId}) does not match agentId (${agentId})`,
+            `sessions.create key agent (${requestedKeyAgentId}) does not match agentId (${agentId})`,
           ),
         );
         return;
@@ -1499,6 +1504,27 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         storePath: target.storePath,
       },
       async ({ sessionEntries }) => {
+        const existingFlowGoEntry = sessionEntries[target.canonicalKey];
+        if (
+          flowGoRoute.kind === "route" &&
+          existingFlowGoEntry?.flowGoOwnerDeviceId &&
+          existingFlowGoEntry.flowGoOwnerDeviceId !== flowGoRoute.ownerDeviceId
+        ) {
+          return {
+            ok: false as const,
+            error: errorShape(
+              ErrorCodes.INVALID_REQUEST,
+              "FlowGo session belongs to a different device",
+            ),
+          };
+        }
+        if (
+          flowGoRoute.kind === "route" &&
+          existingFlowGoEntry?.sessionId &&
+          existingFlowGoEntry.flowGoOwnerDeviceId !== flowGoRoute.ownerDeviceId
+        ) {
+          delete sessionEntries[target.canonicalKey];
+        }
         const patched = await applySessionsPatchToStore({
           cfg,
           store: sessionEntries,
@@ -1511,7 +1537,10 @@ export const sessionsHandlers: GatewayRequestHandlers = {
           },
           loadGatewayModelCatalog: context.loadGatewayModelCatalog,
         });
-        if (!patched.ok || !canonicalParentSessionKey) {
+        if (!patched.ok) {
+          return patched;
+        }
+        if (!canonicalParentSessionKey && flowGoRoute.kind !== "route") {
           return patched;
         }
         const inheritedSelection = normalizeOptionalString(p.model)
@@ -1520,7 +1549,10 @@ export const sessionsHandlers: GatewayRequestHandlers = {
         const nextEntry: SessionEntry = {
           ...patched.entry,
           ...inheritedSelection,
-          parentSessionKey: canonicalParentSessionKey,
+          ...(flowGoRoute.kind === "route"
+            ? { flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId }
+            : {}),
+          ...(canonicalParentSessionKey ? { parentSessionKey: canonicalParentSessionKey } : {}),
         };
         return {
           ...patched,

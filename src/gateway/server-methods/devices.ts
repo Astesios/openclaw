@@ -1,8 +1,8 @@
-// Gateway RPC handlers for device pairing and device-token lifecycle operations.
 import {
   ErrorCodes,
   errorShape,
   formatValidationErrors,
+  validateDeviceAgentBindParams,
   validateDevicePairApproveParams,
   validateDevicePairListParams,
   validateDevicePairRemoveParams,
@@ -10,6 +10,8 @@ import {
   validateDeviceTokenRevokeParams,
   validateDeviceTokenRotateParams,
 } from "../../../packages/gateway-protocol/src/index.js";
+// Gateway RPC handlers for device pairing and device-token lifecycle operations.
+import { listAgentIds, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import {
   approveDevicePairing,
   bindFlowGoDeviceAgent,
@@ -29,6 +31,7 @@ import {
   type PairedDevice,
 } from "../../infra/device-pairing.js";
 import type { DiagnosticSecurityEventInput } from "../../infra/diagnostic-events.js";
+import { normalizeAgentId } from "../../routing/session-key.js";
 import {
   deniesCrossDeviceManagement,
   deniesDeviceTokenRoleManagement,
@@ -49,12 +52,31 @@ type DeviceSessionAuthz = ReturnType<typeof resolveDeviceSessionAuthz>;
 const DEVICE_PAIR_APPROVAL_DENIED_MESSAGE = "device pairing approval denied";
 const DEVICE_PAIR_REJECTION_DENIED_MESSAGE = "device pairing rejection denied";
 
-function redactPairedDevice(
-  device: { tokens?: Record<string, DeviceAuthToken> } & Record<string, unknown>,
-) {
-  // Pairing lists are visible to operators; expose token lifecycle metadata
-  // without returning raw token material or the internal approved-scope set.
-  const { tokens, approvedScopes: _approvedScopes, ...rest } = device;
+function redactPendingDevice(device: DevicePairingPendingRequest) {
+  const { publicKey: _publicKey, ...rest } = device;
+  return rest;
+}
+
+function redactPairedDevice(params: {
+  device: PairedDevice;
+  agentIds: readonly string[];
+  defaultAgentId: string;
+}) {
+  const { publicKey: _publicKey, tokens, approvedScopes: _approvedScopes, ...rest } = params.device;
+  const projection = projectFlowGoDevice(params.device);
+  if (!projection) {
+    return {
+      ...rest,
+      tokens: summarizeDeviceTokens(tokens),
+    };
+  }
+  const rawBoundAgentId = params.device.boundAgentId;
+  const boundAgentId = typeof rawBoundAgentId === "string" ? rawBoundAgentId.trim() : "";
+  const candidateAgentId = boundAgentId || params.defaultAgentId;
+  const agentAvailable = params.agentIds.includes(candidateAgentId);
+  const rawRevision = params.device.bindingRevision;
+  const bindingRevision =
+    Number.isSafeInteger(rawRevision) && Number(rawRevision) >= 0 ? Number(rawRevision) : 0;
   return {
     ...rest,
     tokens: summarizeDeviceTokens(tokens),
@@ -64,6 +86,10 @@ function redactPairedDevice(
     agentAvailability: agentAvailable ? "available" : "unavailable",
     bindingRevision,
   };
+}
+
+function deniesFlowGoAgentBinding(authz: DeviceManagementAuthz): boolean {
+  return !authz.isAdminCaller;
 }
 
 function logDeviceTokenRotationDenied(params: {

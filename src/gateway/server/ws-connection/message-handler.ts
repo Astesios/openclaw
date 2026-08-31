@@ -417,6 +417,8 @@ function resolvePinnedClientMetadata(params: {
   const claimedPlatform = normalizeDeviceMetadataForAuth(params.claimedPlatform);
   const claimedDeviceFamily = normalizeDeviceMetadataForAuth(params.claimedDeviceFamily);
   const claimedModelIdentifier = normalizeDeviceMetadataForAuth(params.claimedModelIdentifier);
+  const claimedClientId = normalizeDeviceMetadataForAuth(params.clientId);
+  const claimedClientMode = normalizeDeviceMetadataForAuth(params.clientMode);
   const pairedClientId = normalizeDeviceMetadataForAuth(params.pairedClientId);
   const pairedClientMode = normalizeDeviceMetadataForAuth(params.pairedClientMode);
   const pairedPlatform = normalizeDeviceMetadataForAuth(params.pairedPlatform);
@@ -424,6 +426,9 @@ function resolvePinnedClientMetadata(params: {
   const pairedModelIdentifier = normalizeDeviceMetadataForAuth(params.pairedModelIdentifier);
   const hasPinnedPlatform = pairedPlatform !== "";
   const hasPinnedDeviceFamily = pairedDeviceFamily !== "";
+  const clientIdMismatch = claimedClientId !== pairedClientId;
+  const clientModeMismatch = claimedClientMode !== pairedClientMode;
+  const modelIdentifierMismatch = claimedModelIdentifier !== pairedModelIdentifier;
   const isLegacyNodeHostPlatformPin =
     params.clientId === GATEWAY_CLIENT_IDS.NODE_HOST &&
     params.clientMode === GATEWAY_CLIENT_MODES.NODE &&
@@ -456,6 +461,7 @@ function resolvePinnedClientMetadata(params: {
     clientModeMismatch,
     platformMismatch,
     deviceFamilyMismatch,
+    modelIdentifierMismatch,
     pinnedPlatform: hasPinnedPlatform ? pinnedPlatform : undefined,
     pinnedDeviceFamily: hasPinnedDeviceFamily ? params.pairedDeviceFamily : undefined,
     ...(isMobileAppPlatformVersionRefresh ? { refreshPairedPlatform: params.claimedPlatform } : {}),
@@ -1339,6 +1345,19 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
             existingPairedDevice: Awaited<ReturnType<typeof getPairedDevice>> | null = null,
             options?: { forceInteractive?: boolean },
           ) => {
+            const pairingMetadataMatches = (
+              pairedCandidate: NonNullable<Awaited<ReturnType<typeof getPairedDevice>>>,
+            ): boolean =>
+              normalizeDeviceMetadataForAuth(pairedCandidate.clientId) ===
+                normalizeDeviceMetadataForAuth(clientPairingMetadata.clientId) &&
+              normalizeDeviceMetadataForAuth(pairedCandidate.clientMode) ===
+                normalizeDeviceMetadataForAuth(clientPairingMetadata.clientMode) &&
+              normalizeDeviceMetadataForAuth(pairedCandidate.platform) ===
+                normalizeDeviceMetadataForAuth(clientPairingMetadata.platform) &&
+              normalizeDeviceMetadataForAuth(pairedCandidate.deviceFamily) ===
+                normalizeDeviceMetadataForAuth(clientPairingMetadata.deviceFamily) &&
+              normalizeDeviceMetadataForAuth(pairedCandidate.modelIdentifier) ===
+                normalizeDeviceMetadataForAuth(clientPairingMetadata.modelIdentifier);
             const pairingStateAllowsRequestedAccess = (
               pairedCandidate: Awaited<ReturnType<typeof getPairedDevice>>,
             ): boolean => {

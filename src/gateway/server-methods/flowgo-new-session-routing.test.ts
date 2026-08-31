@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorCodes } from "../protocol/index.js";
+import { ErrorCodes } from "../../../packages/gateway-protocol/src/index.js";
 import { agentHandlers } from "./agent.js";
 import { chatHandlers } from "./chat.js";
 import { sessionsHandlers } from "./sessions.js";
