@@ -309,6 +309,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         ) {
           throw new Error("child progress capability is no longer active");
         }
+        if (latestBinding.finalizationPlan && !isSubagentSessionKey(requireSession(deps.context))) {
+          throw new Error(
+            "FlowOS Execution owner stage is unavailable after result plan acceptance",
+          );
+        }
         if (
           latestBinding.resultDelivery?.status === "PREPARED" ||
           latestBinding.resultDelivery?.status === "EXECUTION_COMPLETED"
@@ -375,6 +380,9 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error(
             "ROUTEBOOK_GENERATION spawn requires resultPlan with spaceId, artifactTitle, artifactFilePath, artifactType, and cardCaption",
           );
+        }
+        if (current.taskKind !== plannedRoutebookTaskKind && finalizationPlan) {
+          throw new Error("FlowOS Execution result plan is only available to ROUTEBOOK_GENERATION");
         }
         if (current.targetAgentId) {
           if (current.targetAgentId !== params.agentId) {
@@ -491,6 +499,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+        if (binding.finalizationPlan) {
+          throw new Error(
+            "FlowOS Execution owner completion is unavailable after result plan acceptance",
+          );
+        }
         if (!binding.targetAgentId || binding.status !== "ENDED_OK") {
           throw new Error("FlowOS Execution child run has not ended successfully");
         }
@@ -559,6 +572,11 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution binding not found");
         }
         requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+        if (binding.finalizationPlan) {
+          throw new Error(
+            "FlowOS Execution owner failure is unavailable after result plan acceptance",
+          );
+        }
         const current = await requireCurrentExecution(deps, binding, params.expectedVersion);
         const item = await deps.client.fail(params.executionId, {
           expectedVersion: current.version,

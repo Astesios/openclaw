@@ -343,13 +343,13 @@ async function startSpaceExecution(byName: Map<string, AnyAgentTool>) {
   });
 }
 
-async function startRoutebookExecution(byName: Map<string, AnyAgentTool>) {
+async function startRoutebookExecution(byName: Map<string, AnyAgentTool>, spaceId = "sp-trip") {
   await byName.get("flowos_execution_start")?.execute("start", {
     source: "SPACE_TASK",
     taskKind: "ROUTEBOOK_GENERATION",
     title: "生成路书",
     idempotencyKey: "request-routebook-1",
-    spaceId: "sp-trip",
+    spaceId,
   });
 }
 
@@ -361,13 +361,13 @@ const routebookResultPlan = {
   cardCaption: "路书做好啦，点开看看～",
 };
 
-async function spawnRoutebook(owner: ReturnType<typeof tools>) {
+async function spawnRoutebook(owner: ReturnType<typeof tools>, resultPlan = routebookResultPlan) {
   await owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
     executionId: "execution-1",
     attemptId: "attempt-1",
     agentId: "worker",
     task: "generate a routebook",
-    resultPlan: routebookResultPlan,
+    resultPlan,
   });
 }
 
@@ -747,7 +747,7 @@ describe("FlowOS Execution plugin boundaries", () => {
         workspaceDir: "/trusted/workspace",
       },
     });
-    await startSpaceExecution(owner.byName);
+    await startRoutebookExecution(owner.byName);
     await spawnRoutebook(owner);
     expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
       status: "RUNNING",
@@ -792,12 +792,27 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(binding?.targetAgentId).toBeUndefined();
   });
 
+  it("rejects result plans for task kinds that have no registered finalizer", async () => {
+    const owner = tools();
+    await startSpaceExecution(owner.byName);
+    await expect(spawnRoutebook(owner)).rejects.toThrow(
+      "result plan is only available to ROUTEBOOK_GENERATION",
+    );
+    expect(owner.subagent.run).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "CREATED",
+      taskKind: "lushu",
+    });
+  });
+
   it("finalizes a planned routebook without waking the requester model", async () => {
+    const unicodeSpaceId = "sp_烟台看海_483cfc";
+    const unicodeResultPlan = { ...routebookResultPlan, spaceId: unicodeSpaceId };
     const assist = fakeClient();
     const deliverResultCard = vi.fn<ResultCardDelivery>();
     const owner = tools({ client: assist.client, deliverResultCard });
-    await startSpaceExecution(owner.byName);
-    await spawnRoutebook(owner);
+    await startRoutebookExecution(owner.byName, unicodeSpaceId);
+    await spawnRoutebook(owner, unicodeResultPlan);
     const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
     await owner.runtime.subagentEnded(
       {
@@ -812,7 +827,11 @@ describe("FlowOS Execution plugin boundaries", () => {
       },
     );
 
-    expect(owner.validateArtifact).toHaveBeenCalledOnce();
+    expect(owner.validateArtifact).toHaveBeenCalledWith({
+      spaceId: unicodeSpaceId,
+      filePath: routebookResultPlan.artifactFilePath,
+      artifactType: "html",
+    });
     expect(assist.calls.filter((call) => call.path.endsWith("/space-artifacts"))).toHaveLength(1);
     expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(1);
     expect(assist.getItem()).toMatchObject({ status: "SUCCEEDED", version: 3 });
@@ -832,7 +851,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     });
     const deliverResultCard = vi.fn<ResultCardDelivery>();
     const owner = tools({ client: assist.client, validateArtifact, deliverResultCard });
-    await startSpaceExecution(owner.byName);
+    await startRoutebookExecution(owner.byName);
     await spawnRoutebook(owner);
     const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
     await owner.runtime.subagentEnded(
@@ -872,7 +891,7 @@ describe("FlowOS Execution plugin boundaries", () => {
       throw new Error("validator rejected the routebook");
     });
     const owner = tools({ client: assist.client, validateArtifact });
-    await startSpaceExecution(owner.byName);
+    await startRoutebookExecution(owner.byName);
     await spawnRoutebook(owner);
     const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
     await owner.runtime.subagentEnded(
@@ -920,7 +939,7 @@ describe("FlowOS Execution plugin boundaries", () => {
     });
     const deliverResultCard = vi.fn<ResultCardDelivery>();
     const owner = tools({ client: assist.client, deliverResultCard });
-    await startSpaceExecution(owner.byName);
+    await startRoutebookExecution(owner.byName);
     await spawnRoutebook(owner);
     const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
     await owner.runtime.subagentEnded(
@@ -961,6 +980,66 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
       resultDelivery: { status: "DELIVERED" },
     });
+  });
+
+  it("keeps planned finalization exclusive while Artifact registration is retrying", async () => {
+    const assist = fakeClient({
+      beforeRequest(_method, path) {
+        if (path.endsWith("/space-artifacts")) {
+          throw new Error("Assist Artifact registration unavailable");
+        }
+      },
+    });
+    const owner = tools({ client: assist.client });
+    await startRoutebookExecution(owner.byName);
+    await spawnRoutebook(owner);
+    const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
+    await owner.runtime.subagentEnded(
+      {
+        targetSessionKey: binding!.childSessionKey!,
+        targetKind: "subagent",
+        runId: binding!.runId,
+        outcome: "ok",
+      },
+      { childSessionKey: binding!.childSessionKey },
+    );
+
+    await expect(
+      owner.byName.get("flowos_execution_stage")?.execute("owner-stage", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        stageKey: "other",
+        stageLabel: "其他阶段",
+      }),
+    ).rejects.toThrow("owner stage is unavailable after result plan acceptance");
+    await expect(
+      owner.byName.get("flowos_execution_complete")?.execute("owner-complete", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        spaceId: "sp-trip",
+        artifactTitle: "另一个结果",
+        artifactFilePath: "generated/other.html",
+        artifactType: "html",
+        cardCaption: "另一个结果",
+      }),
+    ).rejects.toThrow("owner completion is unavailable after result plan acceptance");
+    await expect(
+      owner.byName.get("flowos_execution_fail")?.execute("owner-fail", {
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        expectedVersion: 2,
+        errorCode: "INTERNAL",
+      }),
+    ).rejects.toThrow("owner failure is unavailable after result plan acceptance");
+    expect(assist.getItem()).toMatchObject({
+      status: "RUNNING",
+      stageKey: "validating",
+      version: 2,
+    });
+    expect(assist.calls.filter((call) => call.path.endsWith("/complete"))).toHaveLength(0);
+    expect(assist.calls.filter((call) => call.path.endsWith("/fail"))).toHaveLength(0);
   });
 
   it("keeps an accepted multi-minute child active past the owner spawn guard", async () => {
