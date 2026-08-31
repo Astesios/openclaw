@@ -514,26 +514,36 @@ function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
       try {
         const existing = await getPairedDevice(deviceId);
         if (existing) {
-          if (
-            existing.publicKey !== publicKey ||
-            existing.clientId !== "gateway-client" ||
-            existing.clientMode !== "ui" ||
-            existing.deviceFamily !== "RaspberryPi"
-          ) {
+          const samePublicKey = existing.publicKey === publicKey;
+          const isCurrentFlowGoIdentity =
+            existing.clientId === "openclaw-pet" &&
+            existing.clientMode === "ui" &&
+            existing.platform === "linux" &&
+            existing.deviceFamily === "RaspberryPi" &&
+            existing.modelIdentifier === "FlowGo";
+          const isLegacyFlowGoIdentity =
+            existing.clientId === "gateway-client" &&
+            existing.clientMode === "ui" &&
+            existing.platform === "linux" &&
+            existing.deviceFamily === "RaspberryPi" &&
+            !existing.modelIdentifier;
+          if (!samePublicKey || (!isCurrentFlowGoIdentity && !isLegacyFlowGoIdentity)) {
             reject(respond, "existing device identity does not match onboarding request");
             return;
           }
-          const token = await ensureDeviceToken({
-            deviceId,
-            role: "operator",
-            scopes: ["operator.read", "operator.write"],
-          });
-          if (!token) {
-            reject(respond, "device token is unavailable");
+          if (isCurrentFlowGoIdentity) {
+            const token = await ensureDeviceToken({
+              deviceId,
+              role: "operator",
+              scopes: ["operator.read", "operator.write"],
+            });
+            if (!token) {
+              reject(respond, "device token is unavailable");
+              return;
+            }
+            respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
             return;
           }
-          respond(true, { deviceId, devicePublicKey: publicKey, deviceToken: token.token });
-          return;
         }
         const requested = await requestDevicePairing({
           deviceId,
@@ -541,8 +551,9 @@ function registerDeviceOnboardingProvisionMethod(api: OpenClawPluginApi): void {
           displayName: "FlowGo",
           platform: "linux",
           deviceFamily: "RaspberryPi",
-          clientId: "gateway-client",
+          clientId: "openclaw-pet",
           clientMode: "ui",
+          modelIdentifier: "FlowGo",
           role: "operator",
           scopes: ["operator.read", "operator.write"],
           silent: false,
