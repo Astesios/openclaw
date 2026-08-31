@@ -436,8 +436,9 @@ describe("flowos task-center auth", () => {
         publicKey,
         platform: "linux",
         deviceFamily: "RaspberryPi",
-        clientId: "gateway-client",
+        clientId: "openclaw-pet",
         clientMode: "ui",
+        modelIdentifier: "FlowGo",
         role: "operator",
         scopes: ["operator.read", "operator.write"],
       }),
@@ -451,9 +452,11 @@ describe("flowos task-center auth", () => {
     pairingMocks.get.mockResolvedValue({
       deviceId,
       publicKey,
-      clientId: "gateway-client",
+      clientId: "openclaw-pet",
       clientMode: "ui",
+      platform: "linux",
       deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
     });
     pairingMocks.ensure.mockResolvedValue({ token: "stable-device-token" });
     const { calls } = setup();
@@ -470,6 +473,57 @@ describe("flowos task-center auth", () => {
     });
     expect(pairingMocks.request).not.toHaveBeenCalled();
     expect(pairingMocks.approve).not.toHaveBeenCalled();
+  });
+
+  it("repairs the legacy FlowGo identity to the current client contract", async () => {
+    const publicKeyBytes = Buffer.alloc(32, 9);
+    const publicKey = publicKeyBytes.toString("base64url");
+    const deviceId = createHash("sha256").update(publicKeyBytes).digest("hex");
+    pairingMocks.get.mockResolvedValue({
+      deviceId,
+      publicKey,
+      clientId: "gateway-client",
+      clientMode: "ui",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+    });
+    pairingMocks.request.mockResolvedValue({
+      status: "pending",
+      created: true,
+      request: { requestId: "repair-1" },
+    });
+    pairingMocks.approve.mockResolvedValue({
+      status: "approved",
+      device: { deviceId },
+    });
+    pairingMocks.ensure.mockResolvedValue({ token: "repaired-device-token" });
+    const { calls } = setup();
+    const [, handler] = method(calls, "flowos.deviceOnboardingProvision");
+    const respond = vi.fn();
+    await invoke(handler, {
+      params: { deviceId, devicePublicKey: publicKey },
+      client: pairedOperator(),
+      respond,
+    });
+    expect(pairingMocks.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deviceId,
+        publicKey,
+        clientId: "openclaw-pet",
+        clientMode: "ui",
+        platform: "linux",
+        deviceFamily: "RaspberryPi",
+        modelIdentifier: "FlowGo",
+      }),
+    );
+    expect(pairingMocks.approve).toHaveBeenCalledWith("repair-1", {
+      callerScopes: ["operator.read", "operator.write", "operator.admin"],
+    });
+    expect(respond).toHaveBeenCalledWith(true, {
+      deviceId,
+      devicePublicKey: publicKey,
+      deviceToken: "repaired-device-token",
+    });
   });
 
   it("issues proactive-service tokens on their own audience", async () => {

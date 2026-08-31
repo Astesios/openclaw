@@ -74,8 +74,9 @@ describe("FlowOS device onboarding provisioning", () => {
       publicKey: publicKeyText,
       platform: "linux",
       deviceFamily: "RaspberryPi",
-      clientId: "gateway-client",
+      clientId: "openclaw-pet",
       clientMode: "ui",
+      modelIdentifier: "FlowGo",
       role: "operator",
       scopes: ["operator.read", "operator.write"],
     });
