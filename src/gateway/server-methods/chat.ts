@@ -3379,6 +3379,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
     const now = Date.now();
     if (flowGoRoute.kind === "route") {
+      const routedBackingSessionId = backingSessionId ?? randomUUID();
       let ownershipConflict = false;
       const ownedEntry = await updateSessionStore(storePath, (store) => {
         const existing = store[sessionKey];
@@ -3392,7 +3393,7 @@ export const chatHandlers: GatewayRequestHandlers = {
         if (existing?.flowGoOwnerDeviceId === flowGoRoute.ownerDeviceId) {
           const next = {
             ...existing,
-            sessionId: existing.sessionId ?? backingSessionId,
+            sessionId: existing.sessionId ?? routedBackingSessionId,
             updatedAt: Math.max(existing.updatedAt ?? 0, now),
             flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
           };
@@ -3400,7 +3401,7 @@ export const chatHandlers: GatewayRequestHandlers = {
           return next;
         }
         const next = {
-          sessionId: backingSessionId,
+          sessionId: routedBackingSessionId,
           updatedAt: now,
           flowGoOwnerDeviceId: flowGoRoute.ownerDeviceId,
         };
