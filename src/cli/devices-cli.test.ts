@@ -624,7 +624,7 @@ describe("devices cli local fallback", () => {
         {
           requestId: "req-old",
           deviceId: "device-1",
-          publicKey: "pk",
+          identityFingerprint: "sha256:same-device-key",
           role: "operator",
           scopes: ["operator.read"],
           clientId: "openclaw-macos",
@@ -635,7 +635,7 @@ describe("devices cli local fallback", () => {
         {
           requestId: "req-new",
           deviceId: "device-1",
-          publicKey: "pk",
+          identityFingerprint: "sha256:same-device-key",
           role: "operator",
           scopes: ["operator.read", "operator.pairing"],
           clientId: "openclaw-macos",
@@ -651,7 +651,7 @@ describe("devices cli local fallback", () => {
         {
           requestId: "req-new",
           deviceId: "device-1",
-          publicKey: "pk",
+          identityFingerprint: "sha256:same-device-key",
           role: "operator",
           scopes: ["operator.read", "operator.pairing"],
           clientId: "openclaw-macos",

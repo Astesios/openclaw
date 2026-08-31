@@ -10,6 +10,7 @@ const hoisted = vi.hoisted(() => ({
   resolveAgentWorkspaceDir: vi.fn(),
   resolveDefaultAgentId: vi.fn(),
   visitSessionMessagesAsync: vi.fn(),
+  authorizeFlowGoOwnedSession: vi.fn(),
 }));
 
 vi.mock("../../agents/agent-scope.js", () => ({
@@ -35,6 +36,10 @@ vi.mock("../session-transcript-readers.js", async () => {
   };
 });
 
+vi.mock("../flowgo-device-routing.js", () => ({
+  authorizeFlowGoOwnedSession: hoisted.authorizeFlowGoOwnedSession,
+}));
+
 function createResponder() {
   const calls: Array<{ ok: boolean; payload?: unknown; error?: unknown }> = [];
   return {
@@ -50,12 +55,13 @@ type SessionFilesMethod = "sessions.files.list" | "sessions.files.get";
 async function invokeSessionFilesHandler(
   method: SessionFilesMethod,
   params: Record<string, unknown>,
+  client: Parameters<(typeof sessionsFilesHandlers)[SessionFilesMethod]>[0]["client"] = null,
 ) {
   const responder = createResponder();
   await sessionsFilesHandlers[method]?.({
     req: { type: "req", id: method, method, params: {} },
     params,
-    client: null,
+    client,
     isWebchatConnect: () => false,
     respond: responder.respond,
     context: {} as never,
@@ -127,6 +133,23 @@ describe("sessions.files RPC handlers", () => {
       ].forEach((message, index) => visit(message, index + 1));
       return 3;
     });
+    hoisted.authorizeFlowGoOwnedSession.mockResolvedValue({ kind: "unchanged" });
+  });
+
+  it("rejects transcript file access when the FlowGo session owner check fails", async () => {
+    hoisted.authorizeFlowGoOwnedSession.mockResolvedValue({
+      kind: "error",
+      message: "FlowGo session belongs to a different device",
+    });
+
+    const error = expectError(
+      await invokeSessionFilesHandler("sessions.files.list", { sessionKey: "agent:main:main" }, {
+        connId: "flowgo-conn",
+      } as never),
+    );
+
+    expect(error.message).toBe("FlowGo session belongs to a different device");
+    expect(hoisted.visitSessionMessagesAsync).not.toHaveBeenCalled();
   });
 
   afterEach(() => {
