@@ -805,6 +805,23 @@ describe("FlowOS Execution plugin boundaries", () => {
     });
   });
 
+  it("rejects a routebook plan that selects the Markdown validator", async () => {
+    const owner = tools();
+    await startRoutebookExecution(owner.byName);
+    await expect(
+      spawnRoutebook(owner, {
+        ...routebookResultPlan,
+        artifactFilePath: "generated/routebook.md",
+        artifactType: "markdown",
+      }),
+    ).rejects.toThrow("ROUTEBOOK_GENERATION result plan requires an HTML Artifact");
+    expect(owner.subagent.run).not.toHaveBeenCalled();
+    expect(await owner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      status: "CREATED",
+      taskKind: "ROUTEBOOK_GENERATION",
+    });
+  });
+
   it("finalizes a planned routebook without waking the requester model", async () => {
     const unicodeSpaceId = "sp_烟台看海_483cfc";
     const unicodeResultPlan = { ...routebookResultPlan, spaceId: unicodeSpaceId };

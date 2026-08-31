@@ -381,6 +381,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             "ROUTEBOOK_GENERATION spawn requires resultPlan with spaceId, artifactTitle, artifactFilePath, artifactType, and cardCaption",
           );
         }
+        if (
+          current.taskKind === plannedRoutebookTaskKind &&
+          finalizationPlan?.artifactType !== "html"
+        ) {
+          throw new Error("ROUTEBOOK_GENERATION result plan requires an HTML Artifact");
+        }
         if (current.taskKind !== plannedRoutebookTaskKind && finalizationPlan) {
           throw new Error("FlowOS Execution result plan is only available to ROUTEBOOK_GENERATION");
         }
