@@ -147,27 +147,48 @@ export type WsOriginCheckMetrics = {
 };
 
 function resolvePinnedClientMetadata(params: {
+  claimedClientId?: string;
+  claimedClientMode?: string;
   claimedPlatform?: string;
   claimedDeviceFamily?: string;
+  claimedModelIdentifier?: string;
+  pairedClientId?: string;
+  pairedClientMode?: string;
   pairedPlatform?: string;
   pairedDeviceFamily?: string;
+  pairedModelIdentifier?: string;
 }): {
+  clientIdMismatch: boolean;
+  clientModeMismatch: boolean;
   platformMismatch: boolean;
   deviceFamilyMismatch: boolean;
+  modelIdentifierMismatch: boolean;
   pinnedPlatform?: string;
   pinnedDeviceFamily?: string;
 } {
+  const claimedClientId = normalizeDeviceMetadataForAuth(params.claimedClientId);
+  const claimedClientMode = normalizeDeviceMetadataForAuth(params.claimedClientMode);
   const claimedPlatform = normalizeDeviceMetadataForAuth(params.claimedPlatform);
   const claimedDeviceFamily = normalizeDeviceMetadataForAuth(params.claimedDeviceFamily);
+  const claimedModelIdentifier = normalizeDeviceMetadataForAuth(params.claimedModelIdentifier);
+  const pairedClientId = normalizeDeviceMetadataForAuth(params.pairedClientId);
+  const pairedClientMode = normalizeDeviceMetadataForAuth(params.pairedClientMode);
   const pairedPlatform = normalizeDeviceMetadataForAuth(params.pairedPlatform);
   const pairedDeviceFamily = normalizeDeviceMetadataForAuth(params.pairedDeviceFamily);
+  const pairedModelIdentifier = normalizeDeviceMetadataForAuth(params.pairedModelIdentifier);
   const hasPinnedPlatform = pairedPlatform !== "";
   const hasPinnedDeviceFamily = pairedDeviceFamily !== "";
+  const clientIdMismatch = claimedClientId !== pairedClientId;
+  const clientModeMismatch = claimedClientMode !== pairedClientMode;
   const platformMismatch = hasPinnedPlatform && claimedPlatform !== pairedPlatform;
   const deviceFamilyMismatch = hasPinnedDeviceFamily && claimedDeviceFamily !== pairedDeviceFamily;
+  const modelIdentifierMismatch = claimedModelIdentifier !== pairedModelIdentifier;
   return {
+    clientIdMismatch,
+    clientModeMismatch,
     platformMismatch,
     deviceFamilyMismatch,
+    modelIdentifierMismatch,
     pinnedPlatform: hasPinnedPlatform ? params.pairedPlatform : undefined,
     pinnedDeviceFamily: hasPinnedDeviceFamily ? params.pairedDeviceFamily : undefined,
   };
@@ -1150,14 +1171,34 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
             const pairedPlatform = paired.platform;
             const claimedDeviceFamily = connectParams.client.deviceFamily;
             const pairedDeviceFamily = paired.deviceFamily;
+            const claimedModelIdentifier = connectParams.client.modelIdentifier;
+            const pairedModelIdentifier = paired.modelIdentifier;
             const metadataPinning = resolvePinnedClientMetadata({
+              claimedClientId: connectParams.client.id,
+              claimedClientMode: connectParams.client.mode,
               claimedPlatform,
               claimedDeviceFamily,
+              claimedModelIdentifier,
+              pairedClientId: paired.clientId,
+              pairedClientMode: paired.clientMode,
               pairedPlatform,
               pairedDeviceFamily,
+              pairedModelIdentifier,
             });
-            const { platformMismatch, deviceFamilyMismatch } = metadataPinning;
-            if (platformMismatch || deviceFamilyMismatch) {
+            const {
+              clientIdMismatch,
+              clientModeMismatch,
+              platformMismatch,
+              deviceFamilyMismatch,
+              modelIdentifierMismatch,
+            } = metadataPinning;
+            if (
+              clientIdMismatch ||
+              clientModeMismatch ||
+              platformMismatch ||
+              deviceFamilyMismatch ||
+              modelIdentifierMismatch
+            ) {
               const allowSilentMetadataUpgrade = shouldAllowSilentLocalPairing({
                 locality: pairingLocality,
                 hasBrowserOriginHeader,
@@ -1168,7 +1209,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               });
               if (!allowSilentMetadataUpgrade) {
                 logGateway.warn(
-                  `security audit: device metadata upgrade requested reason=metadata-upgrade device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} client=${connectParams.client.id} conn=${connId}`,
+                  `security audit: device metadata upgrade requested reason=metadata-upgrade device=${device.id} ip=${reportedClientIp ?? "unknown-ip"} auth=${authMethod} payload=${deviceAuthPayloadVersion ?? "unknown"} claimedClient=${connectParams.client.id} pinnedClient=${paired.clientId ?? "<none>"} claimedMode=${connectParams.client.mode} pinnedMode=${paired.clientMode ?? "<none>"} claimedPlatform=${claimedPlatform ?? "<none>"} pinnedPlatform=${pairedPlatform ?? "<none>"} claimedDeviceFamily=${claimedDeviceFamily ?? "<none>"} pinnedDeviceFamily=${pairedDeviceFamily ?? "<none>"} claimedModel=${claimedModelIdentifier ?? "<none>"} pinnedModel=${pairedModelIdentifier ?? "<none>"} conn=${connId}`,
                 );
               }
               const ok = await requirePairing("metadata-upgrade", paired);
