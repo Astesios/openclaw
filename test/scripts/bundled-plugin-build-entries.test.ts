@@ -181,6 +181,19 @@ describe("bundled plugin build entries", () => {
     }
   });
 
+  it("builds an externalized plugin explicitly selected for a Docker image", () => {
+    const defaultEntries = listBundledPluginBuildEntries();
+    const entries = listBundledPluginBuildEntries({
+      env: {
+        ...process.env,
+        OPENCLAW_EXTENSIONS: "qwen,perplexity",
+      },
+    });
+
+    expect(defaultEntries["extensions/perplexity/index"]).toBeUndefined();
+    expect(entries["extensions/perplexity/index"]).toBe("extensions/perplexity/index.ts");
+  });
+
   it("keeps externalized runtime-dependency plugins out of bundled dist entries", () => {
     const entries = listBundledPluginBuildEntries();
     const artifacts = listBundledPluginPackArtifacts();
