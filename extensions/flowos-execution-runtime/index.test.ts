@@ -739,6 +739,38 @@ describe("FlowOS Execution plugin boundaries", () => {
     expect(schema).not.toContain("idempotencyKey");
   });
 
+  it("normalizes a prefixed target Agent before binding child progress", async () => {
+    const assist = fakeClient();
+    const owner = tools({ client: assist.client });
+    await startExecution(owner.byName);
+    await owner.byName.get("flowos_execution_spawn")?.execute("spawn", {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      agentId: "agent:main",
+      task: "generate result",
+    });
+    const binding = await owner.bindings.byExecution("execution-1", "attempt-1");
+    expect(binding).toMatchObject({
+      targetAgentId: "main",
+      childSessionKey: expect.stringMatching(/^agent:main:subagent:/),
+      status: "RUNNING",
+    });
+
+    const child = tools({
+      bindings: owner.bindings,
+      client: assist.client,
+      context: { agentId: "main", sessionKey: binding!.childSessionKey },
+    });
+    await child.byName.get("flowos_execution_stage")?.execute("child-stage", {
+      executionId: "execution-1",
+      attemptId: "attempt-1",
+      expectedVersion: 1,
+      stageKey: "collecting",
+      stageLabel: "正在收集素材",
+    });
+    expect(assist.getItem()).toMatchObject({ status: "RUNNING", version: 2 });
+  });
+
   it("persists a trusted result plan atomically and rejects replay drift", async () => {
     const owner = tools({
       context: {

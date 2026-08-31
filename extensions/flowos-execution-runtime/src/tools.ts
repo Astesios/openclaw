@@ -10,6 +10,7 @@ import { Type } from "typebox";
 import {
   childSessionKey,
   type FinalizationPlan,
+  normalizeChildAgentId,
   type RunBinding,
   RunBindingStore,
 } from "./bindings.js";
@@ -366,6 +367,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         resultPlan?: Omit<FinalizationPlan, "workspaceDir">;
       };
       const requesterSessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
+      const targetAgentId = normalizeChildAgentId(params.agentId);
       const finalizationPlan = params.resultPlan
         ? { ...params.resultPlan, workspaceDir: requireWorkspaceDir(deps.context) }
         : undefined;
@@ -391,7 +393,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           throw new Error("FlowOS Execution result plan is only available to ROUTEBOOK_GENERATION");
         }
         if (current.targetAgentId) {
-          if (current.targetAgentId !== params.agentId) {
+          if (current.targetAgentId !== targetAgentId) {
             throw new Error("FlowOS Execution Attempt is already assigned to another agent");
           }
           if (!sameFinalizationPlan(current.finalizationPlan, finalizationPlan)) {
@@ -410,12 +412,12 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         if (finalizationPlan && detail.spaceId !== finalizationPlan.spaceId) {
           throw new Error("FlowOS Execution result plan does not match the bound space");
         }
-        const childKey = childSessionKey(params.agentId, params.executionId, params.attemptId);
-        const runId = stableRunId(params.executionId, params.attemptId, params.agentId);
+        const childKey = childSessionKey(targetAgentId, params.executionId, params.attemptId);
+        const runId = stableRunId(params.executionId, params.attemptId, targetAgentId);
         const claim = await deps.bindings.claimSpawn({
           executionId: params.executionId,
           attemptId: params.attemptId,
-          targetAgentId: params.agentId,
+          targetAgentId,
           childSessionKey: childKey,
           runId,
           finalizationPlan,
