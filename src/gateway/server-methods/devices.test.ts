@@ -1,5 +1,6 @@
 // Device method tests cover pairing approval/rejection, paired-device lookup,
 // token rotation/revocation, and operator scope enforcement.
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   onInternalDiagnosticEvent,
@@ -30,6 +31,10 @@ const {
   revokeDeviceTokenMock: vi.fn(),
   rotateDeviceTokenMock: vi.fn(),
 }));
+
+function identityFingerprint(publicKey: string): string {
+  return `sha256:${createHash("sha256").update(publicKey).digest("hex")}`;
+}
 
 vi.mock("../../infra/device-pairing.js", async () => {
   const actual = await vi.importActual<typeof import("../../infra/device-pairing.js")>(
@@ -714,7 +719,14 @@ describe("deviceHandlers", () => {
     expect(opts.respond).toHaveBeenCalledWith(
       true,
       {
-        pending: [{ requestId: "req-1", deviceId: "device-1", ts: 100 }],
+        pending: [
+          {
+            requestId: "req-1",
+            deviceId: "device-1",
+            identityFingerprint: identityFingerprint("pk-1"),
+            ts: 100,
+          },
+        ],
         paired: [
           {
             deviceId: "device-1",
@@ -755,8 +767,18 @@ describe("deviceHandlers", () => {
       true,
       {
         pending: [
-          { requestId: "req-1", deviceId: "device-1", ts: 100 },
-          { requestId: "req-2", deviceId: "device-2", ts: 200 },
+          {
+            requestId: "req-1",
+            deviceId: "device-1",
+            identityFingerprint: identityFingerprint("pk-1"),
+            ts: 100,
+          },
+          {
+            requestId: "req-2",
+            deviceId: "device-2",
+            identityFingerprint: identityFingerprint("pk-2"),
+            ts: 200,
+          },
         ],
         paired: [
           {
@@ -795,7 +817,14 @@ describe("deviceHandlers", () => {
     expect(opts.respond).toHaveBeenCalledWith(
       true,
       {
-        pending: [{ requestId: "req-1", deviceId: "device-1", ts: 100 }],
+        pending: [
+          {
+            requestId: "req-1",
+            deviceId: "device-1",
+            identityFingerprint: identityFingerprint("pk-1"),
+            ts: 100,
+          },
+        ],
         paired: [
           {
             deviceId: "device-2",
@@ -831,8 +860,18 @@ describe("deviceHandlers", () => {
       true,
       {
         pending: [
-          { requestId: "req-1", deviceId: "device-1", ts: 100 },
-          { requestId: "req-2", deviceId: "device-2", ts: 200 },
+          {
+            requestId: "req-1",
+            deviceId: "device-1",
+            identityFingerprint: identityFingerprint("pk-1"),
+            ts: 100,
+          },
+          {
+            requestId: "req-2",
+            deviceId: "device-2",
+            identityFingerprint: identityFingerprint("pk-2"),
+            ts: 200,
+          },
         ],
         paired: [
           {
@@ -921,8 +960,13 @@ describe("deviceHandlers", () => {
       },
       { client: createClient(["operator.admin"], "admin-device", { isDeviceTokenAuth: true }) },
     );
+    const captured = captureSecurityEvents();
 
-    await deviceHandlers["device.agent.bind"](opts);
+    try {
+      await deviceHandlers["device.agent.bind"](opts);
+    } finally {
+      captured.stop();
+    }
 
     expect(bindFlowGoDeviceAgentMock).toHaveBeenCalledWith({
       deviceId: "flowgo-1",
@@ -934,6 +978,27 @@ describe("deviceHandlers", () => {
       expect.objectContaining({ boundAgentId: "pet-agent", bindingRevision: 3 }),
       undefined,
     );
+    expect(captured.events).toHaveLength(1);
+    expect(captured.events[0]).toMatchObject({
+      action: "device.agent.binding",
+      outcome: "success",
+      actor: {
+        kind: "operator",
+        deviceIdHash: expect.stringMatching(/^sha256:[a-f0-9]{12}$/u),
+        role: "admin",
+      },
+      target: { kind: "device", idHash: expect.stringMatching(/^sha256:[a-f0-9]{12}$/u) },
+      policy: { id: "gateway.flowgo-agent-binding", decision: "allow" },
+      control: { id: "device.agent.bind", family: "auth" },
+      attributes: {
+        previous_agent_id: "main",
+        requested_agent_id: "pet-agent",
+        expected_revision: 2,
+        binding_revision: 3,
+      },
+    });
+    expect(JSON.stringify(captured.events)).not.toContain("admin-device");
+    expect(JSON.stringify(captured.events)).not.toContain("flowgo-1");
   });
 
   it("rejects cross-device, unknown-Agent, and stale FlowGo binding writes", async () => {

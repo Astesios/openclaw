@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ErrorCodes,
   errorShape,
@@ -54,7 +55,10 @@ const DEVICE_PAIR_REJECTION_DENIED_MESSAGE = "device pairing rejection denied";
 
 function redactPendingDevice(device: DevicePairingPendingRequest) {
   const { publicKey: _publicKey, ...rest } = device;
-  return rest;
+  return {
+    ...rest,
+    identityFingerprint: `sha256:${createHash("sha256").update(device.publicKey).digest("hex")}`,
+  };
 }
 
 function redactPairedDevice(params: {
@@ -163,6 +167,36 @@ function emitDevicePairingDeniedSecurityEvent(params: {
     decision: "deny",
     controlId: params.controlId,
     reason: params.reason,
+  });
+}
+
+function emitFlowGoBindingSecurityEvent(params: {
+  authz: DeviceSessionAuthz;
+  targetDeviceId: string;
+  outcome: "success" | "denied";
+  decision: "allow" | "deny";
+  reason?: string;
+  previousAgentId?: string;
+  requestedAgentId: string;
+  expectedRevision: number;
+  bindingRevision?: number;
+}) {
+  emitDeviceSecurityEvent({
+    action: "device.agent.binding",
+    outcome: params.outcome,
+    severity: params.outcome === "success" ? "low" : "medium",
+    authz: params.authz,
+    targetDeviceId: params.targetDeviceId,
+    policyId: "gateway.flowgo-agent-binding",
+    decision: params.decision,
+    controlId: "device.agent.bind",
+    reason: params.reason,
+    attributes: {
+      requested_agent_id: params.requestedAgentId,
+      expected_revision: params.expectedRevision,
+      ...(params.previousAgentId ? { previous_agent_id: params.previousAgentId } : {}),
+      ...(params.bindingRevision !== undefined ? { binding_revision: params.bindingRevision } : {}),
+    },
   });
 }
 
@@ -566,6 +600,15 @@ export const deviceHandlers: GatewayRequestHandlers = {
       context.logGateway.warn(
         `device agent binding denied device=${deviceId} reason=operator-admin-required`,
       );
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: "operator-admin-required",
+        requestedAgentId: normalizeAgentId(rawAgentId),
+        expectedRevision,
+      });
       respond(
         false,
         undefined,
@@ -575,6 +618,15 @@ export const deviceHandlers: GatewayRequestHandlers = {
     }
     const agentId = normalizeAgentId(rawAgentId);
     if (!listAgentIds(context.getRuntimeConfig()).includes(agentId)) {
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: "unknown-agent",
+        requestedAgentId: agentId,
+        expectedRevision,
+      });
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown agentId"));
       return;
     }
@@ -586,12 +638,32 @@ export const deviceHandlers: GatewayRequestHandlers = {
           : result.reason === "not-flowgo"
             ? "device is not FlowGo"
             : `device agent binding revision conflict: current revision ${result.bindingRevision}`;
+      emitFlowGoBindingSecurityEvent({
+        authz,
+        targetDeviceId: deviceId,
+        outcome: "denied",
+        decision: "deny",
+        reason: result.reason,
+        requestedAgentId: agentId,
+        expectedRevision,
+        bindingRevision: result.bindingRevision,
+      });
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, message));
       return;
     }
     context.logGateway.info(
       `device agent binding updated device=${result.deviceId} oldAgent=${result.previousBoundAgentId ?? "<default>"} newAgent=${result.boundAgentId} revision=${result.bindingRevision}`,
     );
+    emitFlowGoBindingSecurityEvent({
+      authz,
+      targetDeviceId: result.deviceId,
+      outcome: "success",
+      decision: "allow",
+      requestedAgentId: result.boundAgentId,
+      previousAgentId: result.previousBoundAgentId,
+      expectedRevision,
+      bindingRevision: result.bindingRevision,
+    });
     respond(
       true,
       {

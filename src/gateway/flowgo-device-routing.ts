@@ -1,12 +1,21 @@
 import { listAgentIds, resolveDefaultAgentId } from "../agents/agent-scope.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { getPairedDevice, projectFlowGoDevice } from "../infra/device-pairing.js";
+import {
+  getPairedDevice,
+  projectFlowGoDevice,
+  type PairedDevice,
+} from "../infra/device-pairing.js";
 import {
   normalizeAgentId,
   parseAgentSessionKey,
   toAgentStoreSessionKey,
 } from "../routing/session-key.js";
 import type { GatewayClient } from "./server-methods/types.js";
+
+export type FlowGoCaller =
+  | { kind: "unchanged" }
+  | { kind: "error"; message: string }
+  | { kind: "flowgo"; deviceId: string; device: PairedDevice };
 
 export type FlowGoNewSessionRoute =
   | { kind: "unchanged" }
@@ -26,6 +35,53 @@ export function flowGoRequestedSessionIdMatchesOwnedEntry(params: {
 }
 
 const FLOWGO_SESSION_MARKER = "flowgo-device";
+
+function clientClaimsFlowGoIdentity(client: GatewayClient): boolean {
+  if (!client.connect) {
+    return false;
+  }
+  return Boolean(
+    projectFlowGoDevice({
+      clientId: client.connect.client.id,
+      clientMode: client.connect.client.mode,
+      platform: client.connect.client.platform,
+      deviceFamily: client.connect.client.deviceFamily,
+      modelIdentifier: client.connect.client.modelIdentifier,
+      role: client.connect.role,
+    }),
+  );
+}
+
+export async function resolveFlowGoCaller(client: GatewayClient | null): Promise<FlowGoCaller> {
+  const deviceId = client?.connect?.device?.id?.trim();
+  if (!client || !deviceId) {
+    return { kind: "unchanged" };
+  }
+  const device = await getPairedDevice(deviceId);
+  if (!device) {
+    return { kind: "error", message: "paired device is no longer available" };
+  }
+  if (!projectFlowGoDevice(device)) {
+    return clientClaimsFlowGoIdentity(client)
+      ? { kind: "error", message: "FlowGo device identity is not approved" }
+      : { kind: "unchanged" };
+  }
+  return { kind: "flowgo", deviceId, device };
+}
+
+export async function authorizeFlowGoOwnedSession(params: {
+  client: GatewayClient | null;
+  ownerDeviceId?: string;
+}): Promise<FlowGoCaller | { kind: "allowed"; deviceId: string }> {
+  const caller = await resolveFlowGoCaller(params.client);
+  if (caller.kind !== "flowgo") {
+    return caller;
+  }
+  if (params.ownerDeviceId?.trim() === caller.deviceId) {
+    return { kind: "allowed", deviceId: caller.deviceId };
+  }
+  return { kind: "error", message: "FlowGo session belongs to a different device" };
+}
 
 function parseFlowGoOwnedSessionKey(sessionKey: string | undefined): {
   agentId: string;
@@ -60,17 +116,15 @@ export async function resolveFlowGoNewSessionRoute(params: {
   requestedAgentId?: string;
   requestedSessionKey?: string;
 }): Promise<FlowGoNewSessionRoute> {
-  const deviceId = params.client?.connect.device?.id?.trim();
-  if (!deviceId) {
+  const caller = await resolveFlowGoCaller(params.client);
+  if (caller.kind === "unchanged") {
     return { kind: "unchanged" };
   }
-  const device = await getPairedDevice(deviceId);
-  if (!device) {
-    return { kind: "error", message: "paired device is no longer available" };
+  if (caller.kind === "error") {
+    return caller;
   }
-  if (!projectFlowGoDevice(device)) {
-    return { kind: "unchanged" };
-  }
+  const deviceId = caller.deviceId;
+  const device = caller.device;
 
   const explicitBoundAgentId = device.boundAgentId?.trim();
   const effectiveAgentId = normalizeAgentId(

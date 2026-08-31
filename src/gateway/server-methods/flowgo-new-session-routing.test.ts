@@ -6,8 +6,12 @@ import { sessionsHandlers } from "./sessions.js";
 import type { GatewayRequestHandlerOptions, RespondFn } from "./types.js";
 
 const resolveFlowGoNewSessionRouteMock = vi.hoisted(() => vi.fn());
+const resolveFlowGoCallerMock = vi.hoisted(() => vi.fn());
+const authorizeFlowGoOwnedSessionMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../flowgo-device-routing.js", () => ({
+  authorizeFlowGoOwnedSession: authorizeFlowGoOwnedSessionMock,
+  resolveFlowGoCaller: resolveFlowGoCallerMock,
   resolveFlowGoNewSessionRoute: resolveFlowGoNewSessionRouteMock,
 }));
 
@@ -30,6 +34,11 @@ function createOptions(
 describe("FlowGo new-session handler wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resolveFlowGoCallerMock.mockResolvedValue({ kind: "unchanged" });
+    authorizeFlowGoOwnedSessionMock.mockResolvedValue({
+      kind: "allowed",
+      deviceId: "flowgo-1",
+    });
     resolveFlowGoNewSessionRouteMock.mockResolvedValue({
       kind: "error",
       message: "FlowGo device Agent is unavailable; rebind the device before starting a session",
@@ -62,4 +71,51 @@ describe("FlowGo new-session handler wiring", () => {
       });
     },
   );
+
+  it.each([
+    ["sessions.get", sessionsHandlers["sessions.get"], { key: "agent:main:other" }],
+    ["chat.history", chatHandlers["chat.history"], { sessionKey: "agent:main:other" }],
+    [
+      "chat.message.get",
+      chatHandlers["chat.message.get"],
+      { sessionKey: "agent:main:other", messageId: "message-1" },
+    ],
+  ])(
+    "rejects a FlowGo read through %s when the persisted owner differs",
+    async (method, handler, params) => {
+      resolveFlowGoCallerMock.mockResolvedValue({ kind: "flowgo", deviceId: "flowgo-1" });
+      authorizeFlowGoOwnedSessionMock.mockResolvedValue({
+        kind: "error",
+        message: "FlowGo session belongs to a different device",
+      });
+      const opts = createOptions(method, params);
+
+      await handler(opts);
+
+      expect(opts.respond).toHaveBeenCalledWith(false, undefined, {
+        code: ErrorCodes.INVALID_REQUEST,
+        message: "FlowGo session belongs to a different device",
+      });
+    },
+  );
+
+  it("rejects a FlowGo child session whose parent is not owned by the device", async () => {
+    resolveFlowGoCallerMock.mockResolvedValue({ kind: "flowgo", deviceId: "flowgo-1" });
+    authorizeFlowGoOwnedSessionMock.mockResolvedValue({
+      kind: "error",
+      message: "FlowGo session belongs to a different device",
+    });
+    const opts = createOptions("sessions.create", {
+      key: "main",
+      parentSessionKey: "agent:main:other",
+    });
+
+    await sessionsHandlers["sessions.create"](opts);
+
+    expect(resolveFlowGoNewSessionRouteMock).not.toHaveBeenCalled();
+    expect(opts.respond).toHaveBeenCalledWith(false, undefined, {
+      code: ErrorCodes.INVALID_REQUEST,
+      message: "FlowGo session belongs to a different device",
+    });
+  });
 });

@@ -83,7 +83,11 @@ import {
   resolveAgentIdFromSessionKey,
   toAgentStoreSessionKey,
 } from "../../routing/session-key.js";
-import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
+import {
+  authorizeFlowGoOwnedSession,
+  resolveFlowGoCaller,
+  resolveFlowGoNewSessionRoute,
+} from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
 import { resolveSessionKeyForRun } from "../server-session-key.js";
 import {
@@ -910,7 +914,7 @@ async function handleSessionSend(params: {
     });
   }
 }
-export const sessionsHandlers: GatewayRequestHandlers = {
+const rawSessionsHandlers: GatewayRequestHandlers = {
   "sessions.list": async ({ params, respond, context }) => {
     if (!assertValidParams(params, validateSessionsListParams, "sessions.list", respond)) {
       return;
@@ -2783,3 +2787,163 @@ export const sessionsHandlers: GatewayRequestHandlers = {
     });
   },
 };
+
+const FLOWGO_MULTI_SESSION_METHODS = new Set([
+  "sessions.cleanup",
+  "sessions.resolve",
+  "sessions.reset",
+  "sessions.subscribe",
+  "sessions.unsubscribe",
+]);
+
+async function authorizeFlowGoSessionsRequest(
+  method: string,
+  opts: GatewayRequestHandlerOptions,
+): Promise<boolean> {
+  const caller = await resolveFlowGoCaller(opts.client);
+  if (caller.kind === "unchanged") {
+    return true;
+  }
+  if (caller.kind === "error") {
+    opts.respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, caller.message));
+    return false;
+  }
+  if (method === "sessions.list") {
+    return true;
+  }
+  if (method === "sessions.create") {
+    const parentSessionKey = normalizeOptionalString(
+      (opts.params as { parentSessionKey?: unknown }).parentSessionKey,
+    );
+    if (!parentSessionKey) {
+      return true;
+    }
+    const parentEntry = loadSessionEntry(parentSessionKey).entry;
+    const parentAccess = await authorizeFlowGoOwnedSession({
+      client: opts.client,
+      ownerDeviceId: parentEntry?.flowGoOwnerDeviceId,
+    });
+    if (parentAccess.kind === "allowed") {
+      return true;
+    }
+    opts.respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        parentAccess.kind === "error"
+          ? parentAccess.message
+          : "FlowGo parent session access denied",
+      ),
+    );
+    return false;
+  }
+  if (FLOWGO_MULTI_SESSION_METHODS.has(method)) {
+    opts.respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo devices require an owned session selector"),
+    );
+    return false;
+  }
+
+  const params = opts.params as { key?: unknown; sessionKey?: unknown; agentId?: unknown };
+  const key = normalizeOptionalString(
+    typeof params.key === "string"
+      ? params.key
+      : typeof params.sessionKey === "string"
+        ? params.sessionKey
+        : undefined,
+  );
+  if (method === "sessions.preview") {
+    const keys = Array.isArray(opts.params.keys)
+      ? opts.params.keys.filter((value): value is string => typeof value === "string")
+      : [];
+    for (const previewKey of keys) {
+      const entry = loadSessionEntry(previewKey).entry;
+      const access = await authorizeFlowGoOwnedSession({
+        client: opts.client,
+        ownerDeviceId: entry?.flowGoOwnerDeviceId,
+      });
+      if (access.kind !== "allowed") {
+        opts.respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            access.kind === "error" ? access.message : "FlowGo session access denied",
+          ),
+        );
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (!key) {
+    opts.respond(
+      false,
+      undefined,
+      errorShape(ErrorCodes.INVALID_REQUEST, "FlowGo devices require an owned session selector"),
+    );
+    return false;
+  }
+  const entry = loadSessionEntry(key, {
+    agentId: normalizeOptionalString(params.agentId),
+  }).entry;
+  const access = await authorizeFlowGoOwnedSession({
+    client: opts.client,
+    ownerDeviceId: entry?.flowGoOwnerDeviceId,
+  });
+  if (access.kind === "allowed") {
+    return true;
+  }
+  opts.respond(
+    false,
+    undefined,
+    errorShape(
+      ErrorCodes.INVALID_REQUEST,
+      access.kind === "error" ? access.message : "FlowGo session access denied",
+    ),
+  );
+  return false;
+}
+
+export const sessionsHandlers: GatewayRequestHandlers = Object.fromEntries(
+  Object.entries(rawSessionsHandlers).map(([method, handler]) => [
+    method,
+    async (opts: GatewayRequestHandlerOptions) => {
+      if (!(await authorizeFlowGoSessionsRequest(method, opts))) {
+        return;
+      }
+      if (method !== "sessions.list") {
+        await handler(opts);
+        return;
+      }
+      const caller = await resolveFlowGoCaller(opts.client);
+      if (caller.kind !== "flowgo") {
+        await handler(opts);
+        return;
+      }
+      await handler({
+        ...opts,
+        respond: (ok, payload, error, meta) => {
+          if (!ok || !payload || typeof payload !== "object") {
+            opts.respond(ok, payload, error, meta);
+            return;
+          }
+          const result = payload as { sessions?: Array<{ key?: string }> };
+          const sessions = Array.isArray(result.sessions)
+            ? result.sessions.filter((session) => {
+                const key = normalizeOptionalString(session.key);
+                return key
+                  ? loadSessionEntry(key).entry?.flowGoOwnerDeviceId === caller.deviceId
+                  : false;
+              })
+            : [];
+          opts.respond(true, { ...result, sessions }, error, meta);
+        },
+      });
+    },
+  ]),
+);

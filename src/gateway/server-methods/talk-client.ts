@@ -19,7 +19,10 @@ import {
 import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-shared.js";
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
+import { loadSessionEntry } from "../session-utils.js";
 import { startTalkRealtimeAgentConsult } from "../talk-agent-consult.js";
+import { resolveTalkRealtimeRelaySessionKey } from "../talk-realtime-relay.js";
 import { formatForLog } from "../ws-log.js";
 import {
   buildRealtimeInstructions,
@@ -188,16 +191,43 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       return;
     }
 
+    const relaySessionId = normalizeOptionalString(params.relaySessionId);
+    const connId = normalizeOptionalString(request.client?.connId);
+    let sessionKey = params.sessionKey;
+    if (relaySessionId && connId) {
+      try {
+        sessionKey = resolveTalkRealtimeRelaySessionKey({ relaySessionId, connId }) ?? sessionKey;
+      } catch (err) {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err)));
+        return;
+      }
+    } else {
+      const existingEntry = loadSessionEntry(sessionKey).entry;
+      const route = await resolveFlowGoNewSessionRoute({
+        client: request.client,
+        cfg: request.context.getRuntimeConfig(),
+        existingSessionOwnerDeviceId: existingEntry?.flowGoOwnerDeviceId,
+        requestedSessionKey: sessionKey,
+      });
+      if (route.kind === "error") {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, route.message));
+        return;
+      }
+      if (route.kind === "route" && route.sessionKey) {
+        sessionKey = route.sessionKey;
+      }
+    }
+
     const result = await startTalkRealtimeAgentConsult({
       context: request.context,
       client: request.client,
       isWebchatConnect: request.isWebchatConnect,
       requestId: request.req.id,
-      sessionKey: params.sessionKey,
+      sessionKey,
       callId: params.callId,
       args: params.args ?? {},
-      relaySessionId: normalizeOptionalString(params.relaySessionId),
-      connId: normalizeOptionalString(request.client?.connId),
+      relaySessionId,
+      connId,
     });
     if (!result.ok) {
       respond(false, undefined, result.error);
@@ -224,11 +254,28 @@ export const talkClientHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    let sessionKey = params.sessionKey;
+    if (client?.connect?.device?.id && typeof context.getRuntimeConfig === "function") {
+      const existingEntry = loadSessionEntry(sessionKey).entry;
+      const route = await resolveFlowGoNewSessionRoute({
+        client,
+        cfg: context.getRuntimeConfig(),
+        existingSessionOwnerDeviceId: existingEntry?.flowGoOwnerDeviceId,
+        requestedSessionKey: sessionKey,
+      });
+      if (route.kind === "error") {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, route.message));
+        return;
+      }
+      if (route.kind === "route" && route.sessionKey) {
+        sessionKey = route.sessionKey;
+      }
+    }
     if (
       !hasOwnedActiveTalkClientRun({
         context,
         clientConnId: client?.connId,
-        sessionKey: params.sessionKey,
+        sessionKey,
       })
     ) {
       respond(
@@ -243,7 +290,7 @@ export const talkClientHandlers: GatewayRequestHandlers = {
     }
     try {
       const result = await controlRealtimeVoiceAgentRun({
-        sessionKey: params.sessionKey,
+        sessionKey,
         text: params.text,
         mode: params.mode,
       });

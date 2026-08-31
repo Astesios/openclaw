@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   cancelTalkRealtimeRelayTurn: vi.fn(),
   stopTalkRealtimeRelaySession: vi.fn(),
   registerTalkRealtimeRelayAgentRun: vi.fn(),
+  resolveTalkRealtimeRelaySessionKey: vi.fn(),
   submitTalkRealtimeRelayToolResult: vi.fn(),
   createTalkTranscriptionRelaySession: vi.fn(),
   sendTalkTranscriptionRelayAudio: vi.fn(),
@@ -34,7 +35,13 @@ const mocks = vi.hoisted(() => ({
   controlRealtimeVoiceAgentRun: vi.fn(),
   steerTalkRealtimeRelayAgentRun: vi.fn(),
   resolveSessionKeyFromResolveParams: vi.fn(),
+  getPairedDevice: vi.fn(),
 }));
+
+vi.mock("../../infra/device-pairing.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../infra/device-pairing.js")>();
+  return { ...actual, getPairedDevice: mocks.getPairedDevice };
+});
 
 vi.mock("../../config/config.js", () => ({
   readConfigFileSnapshot: mocks.readConfigFileSnapshot,
@@ -86,6 +93,7 @@ vi.mock("../talk-realtime-relay.js", async (importOriginal) => {
     cancelTalkRealtimeRelayTurn: mocks.cancelTalkRealtimeRelayTurn,
     createTalkRealtimeRelaySession: mocks.createTalkRealtimeRelaySession,
     registerTalkRealtimeRelayAgentRun: mocks.registerTalkRealtimeRelayAgentRun,
+    resolveTalkRealtimeRelaySessionKey: mocks.resolveTalkRealtimeRelaySessionKey,
     sendTalkRealtimeRelayAudio: mocks.sendTalkRealtimeRelayAudio,
     steerTalkRealtimeRelayAgentRun: mocks.steerTalkRealtimeRelayAgentRun,
     stopTalkRealtimeRelaySession: mocks.stopTalkRealtimeRelaySession,
@@ -636,8 +644,8 @@ describe("talk.session unified handlers", () => {
       "Additional realtime instructions:\nSpeak warmly.",
     );
     expect(relayCreateInput.forceAgentConsultOnFinalTranscript).toBe(true);
-    expect(relayCreateInput.instructions).toContain("tool-backed actions");
-    expect(relayCreateInput.instructions).toContain("Let me check that for you");
+    expect(relayCreateInput.instructions).toContain("openclaw_agent_consult");
+    expect(relayCreateInput.instructions).toContain("好的,我看一下");
     expectRespondOk(createRespond, {
       sessionId: "relay-unified-1",
       relaySessionId: "relay-unified-1",
@@ -740,6 +748,120 @@ describe("talk.session unified handlers", () => {
       connId: "conn-1",
     });
     expect(closeRespond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+  });
+
+  it("routes a FlowGo Talk session before creating the provider relay and returns its canonical key", async () => {
+    const provider = {
+      id: "openai",
+      label: "OpenAI Realtime",
+      isConfigured: () => true,
+      createBridge: vi.fn(),
+    };
+    mocks.getPairedDevice.mockResolvedValue({
+      deviceId: "flowgo-1",
+      publicKey: "public-key",
+      clientId: "openclaw-pet",
+      clientMode: "ui",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      role: "operator",
+      boundAgentId: "pet-agent",
+      createdAtMs: 1,
+      approvedAtMs: 2,
+    });
+    mocks.resolveConfiguredRealtimeVoiceProvider.mockReturnValue({
+      provider,
+      providerConfig: { apiKey: "openai-key" },
+    });
+    mocks.createTalkRealtimeRelaySession.mockReturnValue({
+      provider: "openai",
+      transport: "gateway-relay",
+      relaySessionId: "relay-flowgo-1",
+      audio: {
+        inputEncoding: "pcm16",
+        inputSampleRateHz: 24000,
+        outputEncoding: "pcm16",
+        outputSampleRateHz: 24000,
+      },
+      expiresAt: 1_797_986_400,
+    });
+    const client = {
+      connId: "conn-flowgo-1",
+      connect: {
+        role: "operator",
+        client: {
+          id: "openclaw-pet",
+          version: "1.0.0",
+          platform: "linux",
+          mode: "ui",
+          deviceFamily: "RaspberryPi",
+          modelIdentifier: "FlowGo",
+        },
+        device: { id: "flowgo-1" },
+      },
+    } as never;
+    const context = {
+      getRuntimeConfig: () =>
+        ({
+          agents: { list: [{ id: "main" }, { id: "pet-agent" }] },
+          talk: { realtime: { provider: "openai" } },
+        }) as OpenClawConfig,
+    } as never;
+    const respond = vi.fn();
+
+    await talkHandlers["talk.session.create"]({
+      req: { type: "req", id: "flowgo-create", method: "talk.session.create" },
+      params: {
+        mode: "realtime",
+        transport: "gateway-relay",
+        brain: "agent-consult",
+        sessionKey: "main",
+      },
+      client,
+      isWebchatConnect: () => false,
+      respond: respond as never,
+      context,
+    });
+
+    const canonicalKey = "agent:pet-agent:flowgo-device:flowgo-1:main";
+    expect(mockCallArg(mocks.createTalkRealtimeRelaySession)).toMatchObject({
+      connId: "conn-flowgo-1",
+      sessionKey: canonicalKey,
+    });
+    expectRespondOk(respond, { sessionKey: canonicalKey, sessionId: "relay-flowgo-1" });
+
+    vi.clearAllMocks();
+    mocks.getPairedDevice.mockResolvedValue({
+      deviceId: "flowgo-1",
+      publicKey: "public-key",
+      clientId: "openclaw-pet",
+      clientMode: "ui",
+      platform: "linux",
+      deviceFamily: "RaspberryPi",
+      modelIdentifier: "FlowGo",
+      role: "operator",
+      boundAgentId: "deleted-agent",
+      createdAtMs: 1,
+      approvedAtMs: 2,
+    });
+    const rejected = vi.fn();
+    await talkHandlers["talk.session.create"]({
+      req: { type: "req", id: "flowgo-deleted", method: "talk.session.create" },
+      params: {
+        mode: "realtime",
+        transport: "gateway-relay",
+        brain: "agent-consult",
+        sessionKey: "main",
+      },
+      client,
+      isWebchatConnect: () => false,
+      respond: rejected as never,
+      context,
+    });
+    expect(mocks.resolveConfiguredRealtimeVoiceProvider).not.toHaveBeenCalled();
+    expect(mocks.createTalkRealtimeRelaySession).not.toHaveBeenCalled();
+    expectRespondError(rejected, { message: expect.stringContaining("rebind") });
   });
 
   it("returns classified talk issue details when realtime relay creation fails", async () => {
@@ -1609,8 +1731,8 @@ describe("talk.client.create handler", () => {
       reasoningEffort: "low",
     });
     expect(createInput.instructions).toContain("Additional realtime instructions:\nSpeak warmly.");
-    expect(createInput.instructions).toContain("tool-backed actions");
-    expect(createInput.instructions).toContain("Let me check that for you");
+    expect(createInput.instructions).toContain("openclaw_agent_consult");
+    expect(createInput.instructions).toContain("好的,我看一下");
     expect(createInput).not.toHaveProperty("provider");
     expect(createInput).not.toHaveProperty("providers");
     expect(createInput).not.toHaveProperty("transport");

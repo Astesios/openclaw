@@ -22,7 +22,9 @@ import { REALTIME_VOICE_AGENT_CONTROL_TOOL } from "../../talk/agent-run-control-
 import { controlRealtimeVoiceAgentRun } from "../../talk/agent-run-control.js";
 import { resolveConfiguredRealtimeVoiceProvider } from "../../talk/provider-resolver.js";
 import type { TalkBrain, TalkMode, TalkTransport } from "../../talk/talk-events.js";
+import { resolveFlowGoNewSessionRoute } from "../flowgo-device-routing.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
+import { loadSessionEntry } from "../session-utils.js";
 import { resolveSessionKeyFromResolveParams } from "../sessions-resolve.js";
 import {
   cancelTalkHandoffTurn,
@@ -214,6 +216,25 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
     const mode = normalizeTalkSessionMode(params);
     const transport = normalizeTalkSessionTransport({ mode, transport: params.transport });
     const brain = normalizeTalkSessionBrain({ mode, brain: params.brain });
+    let routedSessionKey = normalizeOptionalString(params.sessionKey);
+
+    if (mode === "realtime" && transport === "gateway-relay" && brain === "agent-consult") {
+      const runtimeConfig = context.getRuntimeConfig();
+      const existingEntry = routedSessionKey ? loadSessionEntry(routedSessionKey).entry : undefined;
+      const flowGoRoute = await resolveFlowGoNewSessionRoute({
+        client,
+        cfg: runtimeConfig,
+        existingSessionOwnerDeviceId: existingEntry?.flowGoOwnerDeviceId,
+        requestedSessionKey: routedSessionKey,
+      });
+      if (flowGoRoute.kind === "error") {
+        respondInvalidRequest(respond, flowGoRoute.message);
+        return;
+      }
+      if (flowGoRoute.kind === "route") {
+        routedSessionKey = flowGoRoute.sessionKey;
+      }
+    }
 
     if (transport === "webrtc" || transport === "provider-websocket") {
       respondInvalidRequest(
@@ -338,7 +359,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
               ? []
               : [REALTIME_VOICE_AGENT_CONSULT_TOOL, REALTIME_VOICE_AGENT_CONTROL_TOOL],
           model: launchOptions.model,
-          sessionKey: normalizeOptionalString(params.sessionKey),
+          sessionKey: routedSessionKey,
           voice: launchOptions.voice,
           forceAgentConsultOnFinalTranscript:
             realtimeConfig.consultRouting === "force-agent-consult",
@@ -351,6 +372,7 @@ export const talkSessionHandlers: GatewayRequestHandlers = {
         respondOk(respond, {
           ...session,
           sessionId: session.relaySessionId,
+          ...(routedSessionKey ? { sessionKey: routedSessionKey } : {}),
           mode,
           brain,
         });

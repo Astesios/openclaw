@@ -147,6 +147,7 @@ type TalkRealtimeRelaySessionResult = {
   provider: string;
   transport: "gateway-relay";
   relaySessionId: string;
+  sessionKey?: string;
   audio: RealtimeVoiceBrowserAudioContract;
   model?: string;
   voice?: string;
@@ -710,6 +711,7 @@ export function createTalkRealtimeRelaySession(
     provider: params.provider.id,
     transport: "gateway-relay",
     relaySessionId,
+    ...(relay.sessionKey ? { sessionKey: relay.sessionKey } : {}),
     audio: {
       inputEncoding: "pcm16",
       inputSampleRateHz: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ.sampleRateHz,
@@ -951,6 +953,14 @@ export function registerTalkRealtimeRelayAgentRun(params: {
   if (!session.sessionKey) {
     session.sessionKey = params.sessionKey;
   }
+}
+
+/** Resolves the canonical session key owned by one realtime relay connection. */
+export function resolveTalkRealtimeRelaySessionKey(params: {
+  relaySessionId: string;
+  connId: string;
+}): string | undefined {
+  return getRelaySession(params.relaySessionId, params.connId).sessionKey;
 }
 
 /** Applies realtime voice-control text to the active agent-consult chat run. */

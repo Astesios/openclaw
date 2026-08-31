@@ -1636,7 +1636,11 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
               modelIdentifierMismatch,
             } = metadataPinning;
             const approvalBoundIdentityMismatch =
-              clientIdMismatch || clientModeMismatch || modelIdentifierMismatch;
+              clientIdMismatch ||
+              clientModeMismatch ||
+              platformMismatch ||
+              deviceFamilyMismatch ||
+              modelIdentifierMismatch;
             if (approvalBoundIdentityMismatch || platformMismatch || deviceFamilyMismatch) {
               const allowSilentMetadataUpgrade = shouldAllowSilentLocalPairing({
                 locality: pairingLocality,

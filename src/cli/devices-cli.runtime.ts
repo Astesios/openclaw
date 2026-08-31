@@ -1,4 +1,5 @@
 // Device pairing runtime commands for gateway and loopback-local fallback operations.
+import { createHash } from "node:crypto";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -67,6 +68,7 @@ type PendingDevice = {
   requestId: string;
   deviceId: string;
   publicKey?: string;
+  identityFingerprint?: string;
   displayName?: string;
   clientId?: string;
   clientMode?: string;
@@ -77,6 +79,15 @@ type PendingDevice = {
   isRepair?: boolean;
   ts?: number;
 };
+
+function resolvePendingIdentityFingerprint(request: PendingDevice): string | undefined {
+  const supplied = normalizeOptionalString(request.identityFingerprint);
+  if (supplied) {
+    return supplied;
+  }
+  const publicKey = normalizeOptionalString(request.publicKey);
+  return publicKey ? `sha256:${createHash("sha256").update(publicKey).digest("hex")}` : undefined;
+}
 
 type PairedDevice = {
   deviceId: string;
@@ -458,9 +469,13 @@ function findSameDeviceReplacementRequest(params: {
   if (!originalDeviceId || originalDeviceId !== replacementDeviceId) {
     return null;
   }
-  const originalPublicKey = normalizeOptionalString(params.originalRequest.publicKey);
-  const replacementPublicKey = normalizeOptionalString(replacement.publicKey);
-  if (!originalPublicKey || !replacementPublicKey || originalPublicKey !== replacementPublicKey) {
+  const originalIdentityFingerprint = resolvePendingIdentityFingerprint(params.originalRequest);
+  const replacementIdentityFingerprint = resolvePendingIdentityFingerprint(replacement);
+  if (
+    !originalIdentityFingerprint ||
+    !replacementIdentityFingerprint ||
+    originalIdentityFingerprint !== replacementIdentityFingerprint
+  ) {
     return null;
   }
   if (!hasExactRoleMatch(params.originalRequest, replacement)) {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PairedDevice } from "../infra/device-pairing.js";
 import {
+  authorizeFlowGoOwnedSession,
   flowGoRequestedSessionIdMatchesOwnedEntry,
   resolveFlowGoNewSessionRoute,
 } from "./flowgo-device-routing.js";
@@ -195,6 +196,31 @@ describe("FlowGo new-session routing", () => {
         requestedSessionKey: "agent:main:flowgo-device:flowgo-1:forged-by-sessions-patch",
       }),
     ).resolves.toMatchObject({ kind: "error", message: expect.stringContaining("pet-agent") });
+  });
+
+  it("allows only sessions persisted for the calling FlowGo device", async () => {
+    getPairedDeviceMock.mockResolvedValue(flowGoDevice({ boundAgentId: "pet-agent" }));
+
+    await expect(
+      authorizeFlowGoOwnedSession({
+        client: createClient(),
+        ownerDeviceId: "flowgo-1",
+      }),
+    ).resolves.toEqual({ kind: "allowed", deviceId: "flowgo-1" });
+    await expect(
+      authorizeFlowGoOwnedSession({
+        client: createClient(),
+        ownerDeviceId: "other-device",
+      }),
+    ).resolves.toEqual({
+      kind: "error",
+      message: "FlowGo session belongs to a different device",
+    });
+    await expect(
+      authorizeFlowGoOwnedSession({
+        client: createClient(),
+      }),
+    ).resolves.toMatchObject({ kind: "error" });
   });
 
   it("routes /new from an owned pre-rebind session to the current binding", async () => {

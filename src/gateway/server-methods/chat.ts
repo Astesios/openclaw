@@ -151,6 +151,7 @@ import { stripEnvelopeFromMessage } from "../chat-sanitize.js";
 import { augmentChatHistoryWithCliSessionImports } from "../cli-session-history.js";
 import { isSuppressedControlReplyText } from "../control-reply-text.js";
 import {
+  authorizeFlowGoOwnedSession,
   flowGoRequestedSessionIdMatchesOwnedEntry,
   resolveFlowGoNewSessionRoute,
 } from "../flowgo-device-routing.js";
@@ -337,6 +338,7 @@ async function handleChatMetadataRequest({
   params,
   respond,
   context,
+  client,
 }: GatewayRequestHandlerOptions): Promise<void> {
   if (!validateChatMetadataParams(params)) {
     respond(
@@ -351,10 +353,22 @@ async function handleChatMetadataRequest({
   }
   const metadataParams = params;
   const cfg = context.getRuntimeConfig();
-  const requestedAgentId =
+  let requestedAgentId =
     typeof metadataParams.agentId === "string" && metadataParams.agentId.trim()
       ? normalizeAgentId(metadataParams.agentId)
       : resolveDefaultAgentId(cfg);
+  const flowGoRoute = await resolveFlowGoNewSessionRoute({
+    client,
+    cfg,
+    requestedAgentId,
+  });
+  if (flowGoRoute.kind === "error") {
+    respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoRoute.message));
+    return;
+  }
+  if (flowGoRoute.kind === "route") {
+    requestedAgentId = flowGoRoute.agentId;
+  }
   if (!listAgentIds(cfg).includes(requestedAgentId)) {
     respond(
       false,
@@ -2608,6 +2622,7 @@ async function handleChatHistoryRequest({
   params,
   respond,
   context,
+  client,
   method,
   includeAgentsList,
   includeMetadata,
@@ -2644,6 +2659,14 @@ async function handleChatHistoryRequest({
     sessionKey,
     sessionLoadOptions,
   );
+  const flowGoAccess = await authorizeFlowGoOwnedSession({
+    client,
+    ownerDeviceId: entry?.flowGoOwnerDeviceId,
+  });
+  if (flowGoAccess.kind === "error") {
+    respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoAccess.message));
+    return;
+  }
   const selectedAgent = validateChatSelectedAgent({
     cfg,
     requestedSessionKey: sessionKey,
@@ -2840,7 +2863,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
   },
   "chat.metadata": handleChatMetadataRequest,
-  "chat.message.get": async ({ params, respond, context }) => {
+  "chat.message.get": async ({ params, respond, context, client }) => {
     if (!validateChatMessageGetParams(params)) {
       respond(
         false,
@@ -2866,6 +2889,14 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
     const sessionLoadOptions = requestedAgentId ? { agentId: requestedAgentId } : undefined;
     const { cfg, storePath, entry } = loadSessionEntry(sessionKey, sessionLoadOptions);
+    const flowGoAccess = await authorizeFlowGoOwnedSession({
+      client,
+      ownerDeviceId: entry?.flowGoOwnerDeviceId,
+    });
+    if (flowGoAccess.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoAccess.message));
+      return;
+    }
     const selectedAgent = validateChatSelectedAgent({
       cfg,
       requestedSessionKey: sessionKey,
@@ -5097,7 +5128,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       });
     }
   },
-  "chat.inject": async ({ params, respond, context }) => {
+  "chat.inject": async ({ params, respond, context, client }) => {
     if (!validateChatInjectParams(params)) {
       respond(
         false,
@@ -5131,6 +5162,14 @@ export const chatHandlers: GatewayRequestHandlers = {
       entry,
       canonicalKey: sessionKey,
     } = loadSessionEntry(rawSessionKey, sessionLoadOptions);
+    const flowGoAccess = await authorizeFlowGoOwnedSession({
+      client,
+      ownerDeviceId: entry?.flowGoOwnerDeviceId,
+    });
+    if (flowGoAccess.kind === "error") {
+      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, flowGoAccess.message));
+      return;
+    }
     const selectedAgent = validateChatSelectedAgent({
       cfg,
       requestedSessionKey: rawSessionKey,

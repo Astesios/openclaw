@@ -184,4 +184,67 @@ describe("gateway FlowGo identity repair", () => {
       started.envSnapshot.restore();
     }
   });
+
+  test("requires interactive approval when platform and device family complete a FlowGo identity", async () => {
+    const started = await startServerWithClient("secret");
+    const loaded = loadDeviceIdentity("flowgo-platform-family-repair");
+    const request = await requestDevicePairing({
+      deviceId: loaded.identity.deviceId,
+      publicKey: loaded.publicKey,
+      clientId: GATEWAY_CLIENT_NAMES.PET,
+      clientMode: GATEWAY_CLIENT_MODES.UI,
+      platform: "node",
+      deviceFamily: "Linux",
+      modelIdentifier: "FlowGo",
+      role: "operator",
+      scopes: ["operator.read", "operator.write"],
+    });
+    const approval = await approveDevicePairing(request.request.requestId, {
+      callerScopes: ["operator.read", "operator.write"],
+    });
+    if (!approval || approval.status !== "approved") {
+      throw new Error("failed to seed partial FlowGo identity");
+    }
+    const originalToken = approval.device.tokens?.operator?.token;
+    let repairWs: WebSocket | undefined;
+
+    try {
+      repairWs = await openTrackedWs(started.port);
+      const attempt = await connectReq(repairWs, {
+        token: "secret",
+        deviceIdentityPath: loaded.identityPath,
+        client: {
+          id: GATEWAY_CLIENT_NAMES.PET,
+          version: "1.0.0",
+          platform: "linux",
+          mode: GATEWAY_CLIENT_MODES.UI,
+          deviceFamily: "RaspberryPi",
+          modelIdentifier: "FlowGo",
+        },
+        scopes: ["operator.read", "operator.write"],
+      });
+
+      expect(attempt.ok).toBe(false);
+      expect((attempt.error?.details as { reason?: unknown } | undefined)?.reason).toBe(
+        "metadata-upgrade",
+      );
+      const pending = await listDevicePairing();
+      expect(pending.pending).toHaveLength(1);
+      expect(pending.pending[0]).toMatchObject({
+        deviceId: loaded.identity.deviceId,
+        platform: "linux",
+        deviceFamily: "RaspberryPi",
+        silent: false,
+        isRepair: true,
+      });
+      const paired = await getPairedDevice(loaded.identity.deviceId);
+      expect(paired).toMatchObject({ platform: "node", deviceFamily: "Linux" });
+      expect(paired?.tokens?.operator?.token).toBe(originalToken);
+    } finally {
+      repairWs?.close();
+      started.ws.close();
+      await started.server.close();
+      started.envSnapshot.restore();
+    }
+  });
 });
