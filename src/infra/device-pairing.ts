@@ -47,6 +47,9 @@ export type DevicePairingPendingRequest = {
 /** Bearer token issued to one paired device role. */
 export type DeviceAuthToken = {
   token: string;
+  /** Previous device token accepted once after an approval-bound identity repair. */
+  repairHandoffToken?: string;
+  repairHandoffExpiresAtMs?: number;
   role: string;
   scopes: string[];
   issuer?: {
@@ -798,6 +801,12 @@ export async function approveDevicePairing(
       const tokenNow = Date.now();
       tokens[roleForToken] = {
         token: newToken(),
+        ...(existingToken && pending.isRepair
+          ? {
+              repairHandoffToken: existingToken.token,
+              repairHandoffExpiresAtMs: tokenNow + 5 * 60 * 1000,
+            }
+          : {}),
         role: roleForToken,
         scopes: nextScopes,
         createdAtMs: existingToken?.createdAtMs ?? tokenNow,
@@ -1163,7 +1172,13 @@ export async function verifyDeviceToken(params: {
     if (entry.revokedAtMs) {
       return { ok: false, reason: "token-revoked" };
     }
-    if (!verifyPairingToken(params.token, entry.token)) {
+    const now = Date.now();
+    const usesRepairHandoff =
+      typeof entry.repairHandoffToken === "string" &&
+      typeof entry.repairHandoffExpiresAtMs === "number" &&
+      entry.repairHandoffExpiresAtMs >= now &&
+      verifyPairingToken(params.token, entry.repairHandoffToken);
+    if (!verifyPairingToken(params.token, entry.token) && !usesRepairHandoff) {
       return { ok: false, reason: "token-mismatch" };
     }
     if (
@@ -1193,7 +1208,10 @@ export async function verifyDeviceToken(params: {
     if (!roleScopesAllow({ role, requestedScopes, allowedScopes: entry.scopes })) {
       return { ok: false, reason: "scope-mismatch" };
     }
-    const now = Date.now();
+    if (usesRepairHandoff) {
+      delete entry.repairHandoffToken;
+      delete entry.repairHandoffExpiresAtMs;
+    }
     entry.lastUsedAtMs = now;
     device.tokens ??= {};
     device.tokens[role] = entry;
