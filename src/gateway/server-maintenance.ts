@@ -3,10 +3,12 @@
 import { isFutureDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import type { HealthSummary } from "../commands/health.js";
 import { sweepStaleRunContexts } from "../infra/agent-events.js";
+import { getDiagnosticSessionActivitySnapshot } from "../logging/diagnostic-run-activity.js";
 import { cleanOldMedia } from "../media/store.js";
 import {
   abortTrackedChatRunById,
   type ChatAbortControllerEntry,
+  refreshChatAbortControllerActivity,
   type RestartRecoveryCandidate,
 } from "./chat-abort.js";
 import { pruneStaleControlPlaneBuckets } from "./control-plane-rate-limit.js";
@@ -199,6 +201,22 @@ export function startGatewayMaintenanceTimers(params: {
       }
       if (isFutureDateTimestampMs(entry.expiresAtMs, { nowMs: now })) {
         continue;
+      }
+      if (entry.kind !== "agent" && entry.lastProgressAtMs !== undefined) {
+        const activity = getDiagnosticSessionActivitySnapshot(
+          { sessionId: entry.sessionId, sessionKey: entry.sessionKey },
+          now,
+        );
+        const observedProgressAt =
+          activity.lastProgressAgeMs === undefined ? undefined : now - activity.lastProgressAgeMs;
+        if (
+          observedProgressAt !== undefined &&
+          observedProgressAt > entry.lastProgressAtMs &&
+          refreshChatAbortControllerActivity(entry, observedProgressAt) &&
+          isFutureDateTimestampMs(entry.expiresAtMs, { nowMs: now })
+        ) {
+          continue;
+        }
       }
       if (entry.projectSessionTerminalPersistence) {
         const lifecycleGeneration = entry.lifecycleGeneration?.trim();

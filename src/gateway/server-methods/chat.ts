@@ -3973,6 +3973,11 @@ export const chatHandlers: GatewayRequestHandlers = {
               fastModeOverride: p.fastMode,
               userTurnTranscriptRecorder: userTurnRecorder,
               fastModeAutoOnSecondsOverride: p.fastAutoOnSeconds,
+              // The embedded agent only enables its reasoning stream when a
+              // progress callback exists. Gateway clients consume the emitted
+              // `agent/thinking` events directly, so keep that stream enabled
+              // even though WebChat has no separate channel progress surface.
+              onReasoningStream: () => {},
               onAgentRunStart: (runId) => {
                 agentRunStarted = true;
                 emitServerTiming(
