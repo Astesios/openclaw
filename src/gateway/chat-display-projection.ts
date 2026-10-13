@@ -1596,7 +1596,7 @@ function projectSessionsSendInterSessionMessages(
   return changed ? projected : messages;
 }
 
-const GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT = "The agent run failed before producing a reply.";
+const GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT = "回复生成失败，请稍后重试。";
 
 function sanitizeAssistantErrorDisplayMessage(
   message: Record<string, unknown>,
@@ -1632,9 +1632,15 @@ function projectEmptyAssistantErrorMessages(
   messages: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
   let changed = false;
-  const projected = messages.map((message) => {
+  const projected: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (!message) {
+      continue;
+    }
     if (message.role !== "assistant" || message.stopReason !== "error") {
-      return message;
+      projected.push(message);
+      continue;
     }
     const hasDisplayableStructuredContent =
       Array.isArray(message.content) &&
@@ -1652,7 +1658,8 @@ function projectEmptyAssistantErrorMessages(
       });
     if (hasDisplayableStructuredContent) {
       changed = true;
-      return sanitizeAssistantErrorDisplayMessage(message);
+      projected.push(sanitizeAssistantErrorDisplayMessage(message));
+      continue;
     }
     const sanitized = sanitizeChatHistoryMessage(message, Number.MAX_SAFE_INTEGER)
       .message as Record<string, unknown>;
@@ -1679,7 +1686,50 @@ function projectEmptyAssistantErrorMessages(
     );
     if (!shouldDropAssistantHistoryMessage(sanitized) && hasVisibleReplyText) {
       changed = true;
-      return sanitizeAssistantErrorDisplayMessage(message);
+      projected.push(sanitizeAssistantErrorDisplayMessage(message));
+      continue;
+    }
+
+    // A provider attempt, same-model retry, or runtime recovery may persist an empty
+    // assistant error before the same user turn succeeds. The successful reply is
+    // authoritative; exposing the intermediate record produces a misleading failure
+    // bubble next to an otherwise valid reply.
+    let recoveredLaterInTurn = false;
+    let hasLaterAssistantErrorInTurn = false;
+    for (const later of messages.slice(index + 1)) {
+      if (later.role === "user") {
+        break;
+      }
+      if (later.role !== "assistant") {
+        continue;
+      }
+      if (later.stopReason === "error") {
+        hasLaterAssistantErrorInTurn = true;
+        continue;
+      }
+      if (shouldDropAssistantHistoryMessage(later)) {
+        continue;
+      }
+      if (hasAssistantNonTextContent(later)) {
+        recoveredLaterInTurn = true;
+        break;
+      }
+      const text = extractAssistantTextForSilentCheck(later)?.trim();
+      if (text && !isSuppressedControlReplyText(text)) {
+        recoveredLaterInTurn = true;
+        break;
+      }
+    }
+    if (recoveredLaterInTurn) {
+      changed = true;
+      continue;
+    }
+    // If the whole turn failed, expose only the final empty assistant error. A
+    // fallback chain may persist one error per attempted model; showing every
+    // attempt as a separate failure bubble is noisy and misleading.
+    if (hasLaterAssistantErrorInTurn) {
+      changed = true;
+      continue;
     }
     changed = true;
     const next: Record<string, unknown> = {
@@ -1693,8 +1743,8 @@ function projectEmptyAssistantErrorMessages(
     delete next.errorType;
     delete next.phase;
     delete next.text;
-    return next;
-  });
+    projected.push(next);
+  }
   return changed ? projected : messages;
 }
 

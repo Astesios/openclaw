@@ -917,7 +917,7 @@ describe("projectRecentChatDisplayMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+        content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
         stopReason: "error",
         timestamp: 1,
       },
@@ -936,9 +936,7 @@ describe("projectRecentChatDisplayMessages", () => {
       },
     ]);
 
-    expect(result[0]?.content).toEqual([
-      { type: "text", text: "The agent run failed before producing a reply." },
-    ]);
+    expect(result[0]?.content).toEqual([{ type: "text", text: "回复生成失败，请稍后重试。" }]);
   });
 
   it("projects thinking-only assistant errors as a generic safe failure", () => {
@@ -952,9 +950,7 @@ describe("projectRecentChatDisplayMessages", () => {
       },
     ]);
 
-    expect(result[0]?.content).toEqual([
-      { type: "text", text: "The agent run failed before producing a reply." },
-    ]);
+    expect(result[0]?.content).toEqual([{ type: "text", text: "回复生成失败，请稍后重试。" }]);
   });
 
   it("projects reasoning-text-only assistant errors as a generic safe failure", () => {
@@ -971,7 +967,7 @@ describe("projectRecentChatDisplayMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+        content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
         stopReason: "error",
         timestamp: 1,
       },
@@ -990,9 +986,7 @@ describe("projectRecentChatDisplayMessages", () => {
       },
     ]);
 
-    expect(result[0]?.content).toEqual([
-      { type: "text", text: "The agent run failed before producing a reply." },
-    ]);
+    expect(result[0]?.content).toEqual([{ type: "text", text: "回复生成失败，请稍后重试。" }]);
     expect(JSON.stringify(result[0]?.content)).not.toContain("secret.internal.example");
   });
 
@@ -1010,9 +1004,7 @@ describe("projectRecentChatDisplayMessages", () => {
     ]);
 
     expect(result[0]).not.toHaveProperty("phase");
-    expect(result[0]?.content).toEqual([
-      { type: "text", text: "The agent run failed before producing a reply." },
-    ]);
+    expect(result[0]?.content).toEqual([{ type: "text", text: "回复生成失败，请稍后重试。" }]);
     expect(result[0]).not.toHaveProperty("text");
   });
 
@@ -1071,7 +1063,7 @@ describe("projectRecentChatDisplayMessages", () => {
       expect(result).toEqual([
         {
           role: "assistant",
-          content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+          content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
           stopReason: "error",
           timestamp: 1,
         },
@@ -1097,7 +1089,7 @@ describe("projectRecentChatDisplayMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+        content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
         stopReason: "error",
         timestamp: 1,
       },
@@ -1123,7 +1115,7 @@ describe("projectRecentChatDisplayMessages", () => {
       expect(result).toEqual([
         {
           role: "assistant",
-          content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+          content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
           stopReason: "error",
           timestamp: 1,
         },
@@ -1166,7 +1158,7 @@ describe("projectRecentChatDisplayMessages", () => {
     expect(result).toEqual([
       {
         role: "assistant",
-        content: [{ type: "text", text: "The agent run failed before producing a reply." }],
+        content: [{ type: "text", text: "回复生成失败，请稍后重试。" }],
         stopReason: "error",
         timestamp: 1,
       },
