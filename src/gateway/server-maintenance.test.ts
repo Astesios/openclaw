@@ -2,6 +2,7 @@
 // stale chat buffers, expired runs, health summaries, and timer disposal.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HealthSummary } from "../commands/health.js";
+import { markDiagnosticRunProgressForTest } from "../logging/diagnostic-run-activity.js";
 import type { ChatAbortControllerEntry } from "./chat-abort.js";
 import { DEDUPE_MAX, DEDUPE_TTL_MS } from "./server-constants.js";
 import { createGatewayMaintenanceStateForTest } from "./test-helpers.maintenance-state.js";
@@ -423,6 +424,43 @@ describe("startGatewayMaintenanceTimers", () => {
     expect(activeRun.controller.signal.aborted).toBe(true);
     expect(deps.chatAbortControllers.has(runId)).toBe(false);
 
+    stopMaintenanceTimers(timers);
+  });
+
+  it("renews an expired chat run when internal model or tool progress advanced", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const runId = "run-progress-renewal";
+    const sessionId = "sess-progress-renewal";
+    const sessionKey = "agent:main:progress-renewal";
+    const now = Date.now();
+    const activeRun = createActiveRun(sessionKey, "chat-send");
+    activeRun.sessionId = sessionId;
+    activeRun.expiresAtMs = now + 60_000;
+    activeRun.idleTimeoutMs = 120_000;
+    activeRun.hardExpiresAtMs = now + 24 * 60 * 60_000;
+    activeRun.lastProgressAtMs = now;
+    deps.chatAbortControllers.set(runId, activeRun);
+
+    const timers = startGatewayMaintenanceTimers(deps);
+    await vi.advanceTimersByTimeAsync(30_000);
+    markDiagnosticRunProgressForTest({
+      runId,
+      sessionId,
+      sessionKey,
+      reason: "model_call:stream_progress",
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(activeRun.controller.signal.aborted).toBe(false);
+    expect(activeRun.lastProgressAtMs).toBe(now + 30_000);
+    expect(activeRun.expiresAtMs).toBe(now + 210_000);
+
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(activeRun.controller.signal.aborted).toBe(true);
+    expect(deps.chatAbortControllers.has(runId)).toBe(false);
     stopMaintenanceTimers(timers);
   });
 

@@ -79,6 +79,7 @@ const mockState = vi.hoisted(() => ({
   lastDispatchCtx: undefined as MsgContext | undefined,
   lastDispatchImages: undefined as Array<{ mimeType: string; data: string }> | undefined,
   lastDispatchImageOrder: undefined as string[] | undefined,
+  hasReasoningStreamCallback: false,
   lastDispatchUserTurnInput: undefined as unknown,
   modelCatalog: null as ModelCatalogEntry[] | null,
   emittedTranscriptUpdates: [] as Array<{
@@ -234,11 +235,14 @@ vi.mock("../../auto-reply/dispatch.js", () => ({
         };
         images?: Array<{ mimeType: string; data: string }>;
         imageOrder?: string[];
+        onReasoningStream?: (payload: { text?: string }) => void | Promise<void>;
       };
     }) => {
       mockState.lastDispatchCtx = params.ctx;
       mockState.lastDispatchImages = params.replyOptions?.images;
       mockState.lastDispatchImageOrder = params.replyOptions?.imageOrder;
+      mockState.hasReasoningStreamCallback =
+        typeof params.replyOptions?.onReasoningStream === "function";
       const recorder = params.replyOptions?.userTurnTranscriptRecorder;
       mockState.lastDispatchUserTurnInput = recorder?.resolveMessage
         ? await recorder.resolveMessage()
@@ -826,6 +830,7 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.lastDispatchCtx = undefined;
     mockState.lastDispatchImages = undefined;
     mockState.lastDispatchImageOrder = undefined;
+    mockState.hasReasoningStreamCallback = false;
     mockState.lastDispatchUserTurnInput = undefined;
     mockState.modelCatalog = null;
     mockState.emittedTranscriptUpdates = [];
@@ -3202,6 +3207,20 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
 
     expect(JSON.stringify(payload?.message)).toContain("final answer");
     expect(JSON.stringify(payload?.message)).not.toContain("Reasoning");
+  });
+
+  it("enables reasoning progress for gateway agent events", async () => {
+    createTranscriptFixture("openclaw-chat-send-reasoning-stream-");
+    const respond = vi.fn();
+    const context = createChatContext();
+
+    await runNonStreamingChatSend({
+      context,
+      respond,
+      idempotencyKey: "idem-reasoning-stream",
+    });
+
+    expect(mockState.hasReasoningStreamCallback).toBe(true);
   });
 
   it("chat.inject keeps message defined when directive tag is the only content", async () => {

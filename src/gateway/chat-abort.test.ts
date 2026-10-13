@@ -7,6 +7,7 @@ import {
   abortChatRunsForProvider,
   boundInFlightRunSnapshotForChatHistory,
   isChatStopCommandText,
+  refreshChatAbortControllerActivity,
   registerChatAbortController,
   resolveAgentRunExpiresAtMs,
   resolveChatRunExpiresAtMs,
@@ -178,6 +179,57 @@ describe("isChatStopCommandText", () => {
 });
 
 describe("registerChatAbortController", () => {
+  it("renews interactive chat expiry on model or tool progress without exceeding the hard cap", () => {
+    const now = 1_800_000_000_000;
+    const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
+    const registration = registerChatAbortController({
+      chatAbortControllers,
+      runId: "run-active-chat",
+      sessionId: "sess-1",
+      sessionKey: "main",
+      timeoutMs: 120_000,
+      now,
+      kind: "chat-send",
+    });
+    const entry = registration.entry;
+    if (!entry) {
+      throw new Error("expected registered entry");
+    }
+
+    expect(entry.expiresAtMs).toBe(now + 180_000);
+    expect(refreshChatAbortControllerActivity(entry, now + 90_000)).toBe(true);
+    expect(entry.lastProgressAtMs).toBe(now + 90_000);
+    expect(entry.expiresAtMs).toBe(now + 270_000);
+
+    const hardCap = entry.hardExpiresAtMs;
+    expect(hardCap).toBe(now + 24 * 60 * 60_000);
+    expect(refreshChatAbortControllerActivity(entry, hardCap! - 1_000)).toBe(true);
+    expect(entry.expiresAtMs).toBe(hardCap);
+    expect(refreshChatAbortControllerActivity(entry, hardCap!)).toBe(false);
+  });
+
+  it("does not renew agent RPC registrations", () => {
+    const now = 1_800_000_000_000;
+    const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
+    const registration = registerChatAbortController({
+      chatAbortControllers,
+      runId: "run-agent",
+      sessionId: "sess-1",
+      sessionKey: "main",
+      timeoutMs: 120_000,
+      now,
+      kind: "agent",
+    });
+    const entry = registration.entry;
+    if (!entry) {
+      throw new Error("expected registered entry");
+    }
+    const originalExpiry = entry.expiresAtMs;
+
+    expect(refreshChatAbortControllerActivity(entry, now + 90_000)).toBe(false);
+    expect(entry.expiresAtMs).toBe(originalExpiry);
+  });
+
   it("expires registrations immediately when the process clock is invalid", () => {
     const chatAbortControllers = new Map<string, ChatAbortControllerEntry>();
     const registration = registerChatAbortController({

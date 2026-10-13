@@ -24,6 +24,12 @@ export type ChatAbortControllerEntry = {
   agentId?: string;
   startedAtMs: number;
   expiresAtMs: number;
+  /** Idle timeout used by interactive chat runs. Real model/tool progress renews this deadline. */
+  idleTimeoutMs?: number;
+  /** Absolute safety cap; activity can never extend a run beyond this timestamp. */
+  hardExpiresAtMs?: number;
+  /** Most recent model/tool progress observed by the gateway. */
+  lastProgressAtMs?: number;
   ownerConnId?: string;
   ownerDeviceId?: string;
   providerId?: string;
@@ -134,6 +140,35 @@ export function resolveAgentRunExpiresAtMs(params: {
   });
 }
 
+export function refreshChatAbortControllerActivity(
+  entry: ChatAbortControllerEntry,
+  now = Date.now(),
+): boolean {
+  if (
+    entry.kind === "agent" ||
+    entry.projectSessionActive === false ||
+    entry.controller.signal.aborted ||
+    entry.idleTimeoutMs === undefined ||
+    entry.hardExpiresAtMs === undefined
+  ) {
+    return false;
+  }
+  const safeNow = asDateTimestampMs(now);
+  if (safeNow === undefined || safeNow >= entry.hardExpiresAtMs) {
+    return false;
+  }
+  const renewedExpiresAtMs = resolveChatRunExpiresAtMs({
+    now: safeNow,
+    timeoutMs: entry.idleTimeoutMs,
+  });
+  if (renewedExpiresAtMs <= safeNow) {
+    return false;
+  }
+  entry.lastProgressAtMs = safeNow;
+  entry.expiresAtMs = Math.min(entry.hardExpiresAtMs, renewedExpiresAtMs);
+  return true;
+}
+
 export function registerChatAbortController(params: {
   chatAbortControllers: Map<string, ChatAbortControllerEntry>;
   runId: string;
@@ -194,6 +229,16 @@ export function registerChatAbortController(params: {
   const now = resolveDateTimestampMs(rawNow, 0);
   const explicitExpiresAtMs =
     params.expiresAtMs === undefined ? undefined : (asDateTimestampMs(params.expiresAtMs) ?? 0);
+  const isInteractiveChatRun = params.kind !== "agent" && explicitExpiresAtMs === undefined;
+  const hardExpiresAtMs = isInteractiveChatRun
+    ? resolveChatRunExpiresAtMs({
+        now: rawNow,
+        timeoutMs: 24 * 60 * 60_000,
+        graceMs: 0,
+        minMs: 24 * 60 * 60_000,
+        maxMs: 24 * 60 * 60_000,
+      })
+    : undefined;
   const entry: ChatAbortControllerEntry = {
     controller,
     sessionId: params.sessionId,
@@ -204,6 +249,9 @@ export function registerChatAbortController(params: {
     expiresAtMs:
       explicitExpiresAtMs ??
       resolveChatRunExpiresAtMs({ now: rawNow, timeoutMs: params.timeoutMs }),
+    idleTimeoutMs: isInteractiveChatRun ? Math.max(0, params.timeoutMs) : undefined,
+    hardExpiresAtMs,
+    lastProgressAtMs: isInteractiveChatRun ? now : undefined,
     ownerConnId: params.ownerConnId,
     ownerDeviceId: params.ownerDeviceId,
     providerId: normalizeProviderIdForActiveRun(params.providerId),

@@ -1,15 +1,41 @@
 // Gateway event subscription wiring for agent, heartbeat, transcript, and lifecycle broadcasts.
-import { clearAgentRunContext, onAgentEvent } from "../infra/agent-events.js";
+import {
+  clearAgentRunContext,
+  type AgentEventPayload,
+  onAgentEvent,
+} from "../infra/agent-events.js";
 import { onHeartbeatEvent } from "../infra/heartbeat-events.js";
 import { onSessionLifecycleEvent } from "../sessions/session-lifecycle-events.js";
 import { onSessionTranscriptUpdate } from "../sessions/transcript-events.js";
-import type { ChatAbortControllerEntry, RestartRecoveryCandidate } from "./chat-abort.js";
+import {
+  type ChatAbortControllerEntry,
+  refreshChatAbortControllerActivity,
+  type RestartRecoveryCandidate,
+} from "./chat-abort.js";
 import type {
   ChatRunState,
   SessionEventSubscriberRegistry,
   SessionMessageSubscriberRegistry,
   ToolEventRecipientRegistry,
 } from "./server-chat-state.js";
+
+const CHAT_PROGRESS_STREAMS = new Set([
+  "assistant",
+  "thinking",
+  "tool",
+  "item",
+  "command_output",
+  "patch",
+  "plan",
+  "compaction",
+]);
+
+export function isAgentRunProgressEvent(evt: AgentEventPayload): boolean {
+  if (CHAT_PROGRESS_STREAMS.has(evt.stream)) {
+    return true;
+  }
+  return evt.stream === "lifecycle" && evt.data?.phase === "start";
+}
 
 /** Register gateway runtime event subscriptions and return unsubscribe handles. */
 export function startGatewayEventSubscriptions(params: {
@@ -177,14 +203,28 @@ export function startGatewayEventSubscriptions(params: {
   };
 
   const agentUnsub = onAgentEvent((evt) => {
+    const chatLink = params.chatRunState.registry.peek(evt.runId);
+    const clientRunId = chatLink?.clientRunId ?? evt.runId;
+    const candidateRunIds = evt.runId === clientRunId ? [evt.runId] : [evt.runId, clientRunId];
     const lifecyclePhase =
       evt.stream === "lifecycle" && typeof evt.data?.phase === "string"
         ? evt.data.phase
         : undefined;
+    if (isAgentRunProgressEvent(evt)) {
+      const eventLifecycleGeneration = evt.lifecycleGeneration?.trim();
+      for (const candidateRunId of candidateRunIds) {
+        const entry = params.chatAbortControllers.get(candidateRunId);
+        if (
+          entry &&
+          (!eventLifecycleGeneration ||
+            !entry.lifecycleGeneration ||
+            entry.lifecycleGeneration === eventLifecycleGeneration)
+        ) {
+          refreshChatAbortControllerActivity(entry, evt.ts);
+        }
+      }
+    }
     if (lifecyclePhase === "end" || lifecyclePhase === "error") {
-      const chatLink = params.chatRunState.registry.peek(evt.runId);
-      const clientRunId = chatLink?.clientRunId ?? evt.runId;
-      const candidateRunIds = evt.runId === clientRunId ? [evt.runId] : [evt.runId, clientRunId];
       for (const candidateRunId of candidateRunIds) {
         const entry = params.chatAbortControllers.get(candidateRunId);
         const eventLifecycleGeneration = evt.lifecycleGeneration?.trim();
@@ -202,9 +242,6 @@ export function startGatewayEventSubscriptions(params: {
         }
       }
     } else if (lifecyclePhase === "start") {
-      const chatLink = params.chatRunState.registry.peek(evt.runId);
-      const clientRunId = chatLink?.clientRunId ?? evt.runId;
-      const candidateRunIds = evt.runId === clientRunId ? [evt.runId] : [evt.runId, clientRunId];
       const eventLifecycleGeneration = evt.lifecycleGeneration?.trim();
       for (const candidateRunId of candidateRunIds) {
         const entry = params.chatAbortControllers.get(candidateRunId);
