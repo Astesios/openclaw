@@ -1084,6 +1084,17 @@ export const AgentEntrySchema = z
     params: z.record(z.string(), z.unknown()).optional(),
     tools: AgentToolsSchema,
     runtime: AgentRuntimeSchema,
+    professionalAgent: z
+      .object({
+        managed: z.literal(true),
+        templateId: z.string(),
+        templateVersion: z.number().int().positive(),
+        sourceSkill: z.string(),
+        sourceDigest: z.string(),
+        toolProfile: z.string(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

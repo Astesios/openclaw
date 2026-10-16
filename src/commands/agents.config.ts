@@ -13,8 +13,10 @@ import {
 import type { AgentIdentityFile } from "../agents/identity-file.js";
 import { identityHasValues, loadAgentIdentityFromWorkspace } from "../agents/identity-file.js";
 import { listRouteBindings } from "../config/bindings.js";
+import type { AgentConfig } from "../config/types.agents.js";
 import type { IdentityConfig } from "../config/types.base.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { AgentToolsConfig } from "../config/types.tools.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 
 export type AgentSummary = {
@@ -120,6 +122,10 @@ export function applyAgentConfig(
     agentDir?: string;
     model?: string;
     identity?: IdentityConfig;
+    description?: string;
+    skills?: string[];
+    tools?: AgentToolsConfig;
+    professionalAgent?: AgentConfig["professionalAgent"];
   },
 ): OpenClawConfig {
   const agentId = normalizeAgentId(params.agentId);
@@ -135,6 +141,10 @@ export function applyAgentConfig(
     ...(params.agentDir ? { agentDir: params.agentDir } : {}),
     ...(params.model ? { model: params.model } : {}),
     ...(mergedIdentity ? { identity: mergedIdentity } : {}),
+    ...(params.description ? { description: params.description } : {}),
+    ...(params.skills ? { skills: params.skills } : {}),
+    ...(params.tools ? { tools: params.tools } : {}),
+    ...(params.professionalAgent ? { professionalAgent: params.professionalAgent } : {}),
   };
   const nextList = [...list];
   if (index >= 0) {

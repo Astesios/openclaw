@@ -9,12 +9,18 @@ import {
 } from "../../commands/agents.config.js";
 import { mutateConfigFileWithRetry } from "../../config/config.js";
 import { resolveSessionTranscriptsDirForAgent } from "../../config/sessions.js";
+import type { AgentConfig } from "../../config/types.agents.js";
 import type { IdentityConfig } from "../../config/types.base.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import type { AgentToolsConfig } from "../../config/types.tools.js";
 
 export type AgentDeleteMutationResult = {
   workspaceDir: string;
   agentDir: string;
+  description?: string;
+  skills?: string[];
+  tools?: AgentToolsConfig;
+  professionalAgent?: AgentConfig["professionalAgent"];
   sessionsDir: string;
   removedBindings: number;
 };
@@ -47,8 +53,8 @@ export async function createAgentConfigEntry(params: {
   model?: string;
   identity?: IdentityConfig;
   agentDir: string;
-}): Promise<void> {
-  await mutateConfigFileWithRetry({
+}): Promise<OpenClawConfig> {
+  const committed = await mutateConfigFileWithRetry({
     afterWrite: { mode: "auto" },
     mutate: (draft) => {
       if (isConfiguredAgent(draft, params.agentId)) {
@@ -61,10 +67,15 @@ export async function createAgentConfigEntry(params: {
         model: params.model,
         identity: params.identity,
         agentDir: params.agentDir,
+        description: params.description,
+        skills: params.skills,
+        tools: params.tools,
+        professionalAgent: params.professionalAgent,
       });
       Object.assign(draft, latestNextConfig);
     },
   });
+  return committed.nextConfig;
 }
 
 /** Updates an existing agent entry while preserving omitted fields. */

@@ -17,6 +17,17 @@ export type SkillInstallSpec = {
   targetDir?: string;
 };
 
+export type ProfessionalAgentSkillTemplate = {
+  schemaVersion: 1;
+  templateId: string;
+  templateVersion: number;
+  displayName: string;
+  description: string;
+  isolation: "recommended" | "required";
+  toolProfile: string;
+  entrySkills: string[];
+};
+
 export type OpenClawSkillMetadata = {
   always?: boolean;
   skillKey?: string;
@@ -31,6 +42,8 @@ export type OpenClawSkillMetadata = {
     config?: string[];
   };
   install?: SkillInstallSpec[];
+  /** Static, side-effect-free recipe for an explicitly confirmed professional agent. */
+  professionalAgent?: ProfessionalAgentSkillTemplate;
 };
 
 export type SkillInvocationPolicy = {
