@@ -575,6 +575,8 @@ export const coreGatewayHandlers: GatewayRequestHandlers = {
   ...createLazyCoreHandlers({
     methods: [
       "agents.list",
+      "agents.creator.start",
+      "agents.creator.wait",
       "agents.create",
       "agents.update",
       "agents.delete",

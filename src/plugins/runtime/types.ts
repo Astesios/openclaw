@@ -16,6 +16,10 @@ export type SubagentRunParams = {
   lane?: string;
   lightContext?: boolean;
   deliver?: boolean;
+  /** Run the provider without the normal agent tool surface. */
+  modelRun?: boolean;
+  /** Controls how much of the agent system prompt is included. */
+  promptMode?: "full" | "minimal" | "none";
   idempotencyKey?: string;
   /** Hard deadline for this plugin-owned run. Zero keeps the configured no-timeout behavior. */
   runTimeoutSeconds?: number;

@@ -587,6 +587,7 @@ describe("FlowOS Execution plugin boundaries", () => {
       "flowos_execution_stage",
       "flowos_execution_spawn",
       "flowos_execution_complete",
+      "flowos_execution_finish",
       "flowos_execution_fail",
     ]);
     for (const tool of byName.values()) {

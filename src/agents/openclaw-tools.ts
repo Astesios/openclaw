@@ -39,6 +39,7 @@ import type { SandboxFsBridge } from "./sandbox/fs-bridge.js";
 import type { SpawnedToolContext } from "./spawned-context.js";
 import type { ToolFsPolicy } from "./tool-fs-policy.js";
 import { resolveToolLoopDetectionConfig } from "./tool-loop-detection-config.js";
+import { createAgentCreatorTool } from "./tools/agent-creator-tool.js";
 import { createAgentsListTool } from "./tools/agents-list-tool.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { createCronTool, type CronCreatorToolAllowlistEntry } from "./tools/cron-tool.js";
@@ -457,6 +458,13 @@ export function createOpenClawTools(
     createAgentsListTool({
       agentSessionKey: options?.agentSessionKey,
       requesterAgentIdOverride: options?.requesterAgentIdOverride,
+    }),
+    createAgentCreatorTool({
+      workspaceDir,
+      agentId: sessionAgentId,
+      sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+      runId: options?.runId,
+      senderIsOwner: options?.senderIsOwner,
     }),
     createGetGoalTool({
       agentSessionKey: options?.agentSessionKey,
