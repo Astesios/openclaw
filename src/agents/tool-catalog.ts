@@ -268,9 +268,9 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
-    id: "professional_agent",
-    label: "professional_agent",
-    description: "Offer an isolated professional agent and request native user confirmation",
+    id: "agent_creator",
+    label: "agent_creator",
+    description: "Read agent creation catalogs or create an explicitly confirmed agent draft",
     sectionId: "agents",
     profiles: ["minimal", "coding", "messaging"],
     includeInOpenClawGroup: true,

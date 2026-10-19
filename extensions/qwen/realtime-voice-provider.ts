@@ -49,8 +49,9 @@ type QwenRealtimeVoiceProviderConfig = {
 type QwenRealtimeVoiceBridgeConfig = RealtimeVoiceBridgeCreateRequest &
   QwenRealtimeVoiceProviderConfig;
 
-// 必须用 3.5 系列：qwen3-omni-flash-realtime(3.0)在 realtime 下不支持 tools(session.update
-// 里的 tools 被静默丢弃 → 模型永不发 function_call → agent-consult 失效)。3.5 才认 tools。
+// 必须用 3.5 及以上：qwen3-omni-flash-realtime(3.0)在 realtime 下不支持 tools(session.update
+// 里的 tools 被静默丢弃 → 模型永不发 function_call → agent-consult 失效)。3.5 / 3.8 才认 tools。
+// 3.8(qwen3.8-omni-flash-realtime)只能走绑定业务空间的 maas 端点，且音色表与 3.5 不同(无 Ethan)。
 const QWEN_REALTIME_DEFAULT_MODEL = "qwen3.5-omni-flash-realtime";
 const QWEN_REALTIME_DEFAULT_VOICE = "Ethan";
 // 用户侧输入转写模型。DashScope realtime 默认不开转写，须在 session.update 显式声明，否则
@@ -74,7 +75,7 @@ const CONTINUE_AFTER_SILENT_SIDE_EFFECT_INSTRUCTIONS =
   "继续自然完成当前对用户的语音回复。不要提及刚才的工具、工具参数、工具结果、表情或内部执行状态。";
 
 export function supportsQwenRealtimeToolCalls(model: string | undefined): boolean {
-  return /^qwen3\.5-omni-(?:flash|plus)-realtime(?:-\d{4}-\d{2}-\d{2})?$/.test(
+  return /^qwen3\.[58]-omni-(?:flash|plus)-realtime(?:-\d{4}-\d{2}-\d{2})?$/.test(
     model ?? QWEN_REALTIME_DEFAULT_MODEL,
   );
 }

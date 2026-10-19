@@ -30,6 +30,22 @@ const executionRuntimePurpose = "flowos-execution-runtime-v1";
 const imageGenerationRuntimePurpose = "flowos-image-generation-runtime-v1";
 const standardOwnerAgentId = "agent:main";
 const nodeSendKey = Symbol.for("openclaw.gateway.nodeSendToSession");
+const agentCreatorExecutionBridgeKey = Symbol.for("openclaw.flowos.agentCreatorExecutionRuntime");
+
+type AgentCreatorExecutionBridge = {
+  start: (params: {
+    requestId: string;
+    title: string;
+  }) => Promise<{ executionId: string; attemptId: string }>;
+  stage: (params: {
+    executionId: string;
+    stageKey: string;
+    stageLabel: string;
+    progress?: number;
+  }) => Promise<void>;
+  finish: (params: { executionId: string; resourceId: string }) => Promise<void>;
+  fail: (params: { executionId: string; errorCode: string }) => Promise<void>;
+};
 
 type NodeSend = (sessionKey: string, event: string, payload: unknown) => void;
 
@@ -144,6 +160,54 @@ export default definePluginEntry({
       }),
     );
     const client = new FlowosExecutionClient(createAssistRequest(endpoint, token));
+    const executionBridge: AgentCreatorExecutionBridge = {
+      async start(params) {
+        const item = await client.create({
+          source: "USER",
+          taskKind: "AGENT_CREATION",
+          title: params.title,
+          idempotencyKey: params.requestId,
+          ownerAgentId,
+          surfaceKind: "AI_TASK",
+          visibilityPolicy: "DEFAULT",
+        });
+        const attemptId = item.currentAttemptId;
+        if (!attemptId) {
+          throw new Error("Assist created an agent creation Execution without an Attempt");
+        }
+        return { executionId: item.executionId, attemptId };
+      },
+      async stage(params) {
+        const current = await client.detail(params.executionId);
+        await client.stage(params.executionId, {
+          expectedVersion: current.version,
+          stageKey: params.stageKey,
+          stageLabel: params.stageLabel,
+          ...(params.progress === undefined ? {} : { progress: params.progress }),
+        });
+      },
+      async finish(params) {
+        const resultRef = await client.registerResource(params.executionId, {
+          resourceId: params.resourceId,
+          resourceKind: "GENERIC",
+        });
+        const current = await client.detail(params.executionId);
+        await client.complete({
+          executionId: params.executionId,
+          expectedVersion: current.version,
+          resultRef,
+        });
+      },
+      async fail(params) {
+        const current = await client.detail(params.executionId);
+        await client.fail(params.executionId, {
+          expectedVersion: current.version,
+          errorCode: params.errorCode,
+          retryable: false,
+        });
+      },
+    };
+    (globalThis as Record<PropertyKey, unknown>)[agentCreatorExecutionBridgeKey] = executionBridge;
     const imageRequest = createAssistRequest(endpoint, imageToken, { timeoutMs: 180_000 });
     const imageRuns = new ImageGenerationRunStore();
     const materialRequest = createAssistRequest(endpoint, token, {
@@ -217,6 +281,7 @@ export default definePluginEntry({
           "flowos_execution_stage",
           "flowos_execution_spawn",
           "flowos_execution_complete",
+          "flowos_execution_finish",
           "flowos_execution_fail",
           "flowos_image_generate",
           "flowos_agent_avatar_apply",

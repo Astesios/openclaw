@@ -9,18 +9,12 @@ import {
 } from "../../commands/agents.config.js";
 import { mutateConfigFileWithRetry } from "../../config/config.js";
 import { resolveSessionTranscriptsDirForAgent } from "../../config/sessions.js";
-import type { AgentConfig } from "../../config/types.agents.js";
 import type { IdentityConfig } from "../../config/types.base.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { AgentToolsConfig } from "../../config/types.tools.js";
 
 export type AgentDeleteMutationResult = {
   workspaceDir: string;
   agentDir: string;
-  description?: string;
-  skills?: string[];
-  tools?: AgentToolsConfig;
-  professionalAgent?: AgentConfig["professionalAgent"];
   sessionsDir: string;
   removedBindings: number;
 };
@@ -49,12 +43,15 @@ export function isConfiguredAgent(cfg: OpenClawConfig, agentId: string): boolean
 export async function createAgentConfigEntry(params: {
   agentId: string;
   name: string;
+  description?: string;
   workspace: string;
   model?: string;
+  skills?: string[];
   identity?: IdentityConfig;
   agentDir: string;
-}): Promise<OpenClawConfig> {
-  const committed = await mutateConfigFileWithRetry({
+  skillSymlinkTargets?: string[];
+}): Promise<void> {
+  await mutateConfigFileWithRetry({
     afterWrite: { mode: "auto" },
     mutate: (draft) => {
       if (isConfiguredAgent(draft, params.agentId)) {
@@ -63,19 +60,33 @@ export async function createAgentConfigEntry(params: {
       const latestNextConfig = applyAgentConfig(draft, {
         agentId: params.agentId,
         name: params.name,
+        description: params.description,
         workspace: params.workspace,
         model: params.model,
+        skills: params.skills,
         identity: params.identity,
         agentDir: params.agentDir,
-        description: params.description,
-        skills: params.skills,
-        tools: params.tools,
-        professionalAgent: params.professionalAgent,
       });
-      Object.assign(draft, latestNextConfig);
+      const existingTargets = latestNextConfig.skills?.load?.allowSymlinkTargets ?? [];
+      const skillSymlinkTargets = [
+        ...new Set([...existingTargets, ...(params.skillSymlinkTargets ?? [])]),
+      ];
+      Object.assign(draft, {
+        ...latestNextConfig,
+        ...(skillSymlinkTargets.length > 0
+          ? {
+              skills: {
+                ...latestNextConfig.skills,
+                load: {
+                  ...latestNextConfig.skills?.load,
+                  allowSymlinkTargets: skillSymlinkTargets,
+                },
+              },
+            }
+          : {}),
+      });
     },
   });
-  return committed.nextConfig;
 }
 
 /** Updates an existing agent entry while preserving omitted fields. */

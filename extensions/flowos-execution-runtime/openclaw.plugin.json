@@ -12,6 +12,7 @@
       "flowos_execution_stage",
       "flowos_execution_spawn",
       "flowos_execution_complete",
+      "flowos_execution_finish",
       "flowos_execution_fail",
       "flowos_image_generate",
       "flowos_agent_avatar_apply",

@@ -22,6 +22,11 @@ export type SpaceArtifactRef = {
   spaceId: string;
 };
 
+export type ResourceRef = {
+  type: "RESOURCE";
+  id: string;
+};
+
 export type AssistRequest = (
   method: "GET" | "POST",
   path: string,
@@ -202,6 +207,21 @@ export class FlowosExecutionClient {
         payload,
       ),
     );
+  }
+
+  async registerResource(
+    executionId: string,
+    payload: Record<string, unknown>,
+  ): Promise<ResourceRef> {
+    const value = await this.request(
+      "POST",
+      `/api/executions/${encodeURIComponent(executionId)}/resources`,
+      payload,
+    );
+    if (value.type !== "RESOURCE" || typeof value.id !== "string" || !value.id) {
+      throw new Error("Assist returned an invalid resource reference");
+    }
+    return { type: "RESOURCE", id: value.id };
   }
 
   async fail(executionId: string, payload: Record<string, unknown>): Promise<ActiveExecution> {
