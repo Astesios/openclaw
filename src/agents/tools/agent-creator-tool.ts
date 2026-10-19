@@ -54,6 +54,7 @@ const createKeys = new Set(["action", "confirmation_id"]);
 
 type PendingAgentDraft = {
   confirmationId: string;
+  cardId: string;
   preparedRunId: string;
   expiresAtMs: number;
   name: string;
@@ -153,7 +154,9 @@ export function createAgentCreatorTool(options: {
           pending.confirmationId !== confirmationId ||
           pending.expiresAtMs <= Date.now()
         ) {
-          pendingDrafts.delete(sessionKey);
+          // Preserve a stale draft long enough for the next prepare to reuse its public cardId.
+          // The replacement draft refreshes every private field and its confirmation id while the
+          // stable public identity lets clients advance the original card instead of adding one.
           throw new ToolInputError("confirmed agent draft is missing or expired; prepare it again");
         }
         if (pending.preparedRunId === runId) {
@@ -198,6 +201,17 @@ export function createAgentCreatorTool(options: {
           workspace: result.workspace,
           skill_keys: result.skills ?? [],
           avatar_profile_id: result.avatarProfileId,
+          card: {
+            type: "agent_creation_card",
+            phase: "created",
+            cardId: pending.cardId,
+            agentId: result.agentId,
+            name: result.name,
+            description: pending.description,
+            skillKeys: result.skills ?? [],
+            avatarProfileId: result.avatarProfileId,
+            emoji: pending.emoji,
+          },
         });
       }
 
@@ -219,16 +233,21 @@ export function createAgentCreatorTool(options: {
       }
 
       const confirmationId = `agent-draft-${randomUUID()}`;
+      const cardId = pendingDrafts.get(sessionKey)?.cardId ?? `agent-creation-${randomUUID()}`;
       const expiresAtMs = Date.now() + pendingDraftTtlMs;
+      const name = readStringParam(params, "name", { required: true });
+      const description = readStringParam(params, "description", { required: true });
+      const emoji = readStringParam(params, "emoji", { required: true });
       pendingDrafts.set(sessionKey, {
         confirmationId,
+        cardId,
         preparedRunId: runId,
         expiresAtMs,
-        name: readStringParam(params, "name", { required: true }),
-        description: readStringParam(params, "description", { required: true }),
+        name,
+        description,
         skillKeys,
         avatarProfileId,
-        emoji: readStringParam(params, "emoji", { required: true }),
+        emoji,
         workspaceFiles: {
           agents: readStringParam(params, "agents_md", { required: true, trim: false }),
           soul: readStringParam(params, "soul_md", { required: true, trim: false }),
@@ -240,6 +259,16 @@ export function createAgentCreatorTool(options: {
         status: "pending_confirmation",
         confirmation_id: confirmationId,
         expires_at_ms: expiresAtMs,
+        card: {
+          type: "agent_creation_card",
+          phase: "suggest",
+          cardId,
+          name,
+          description,
+          skillKeys,
+          avatarProfileId,
+          emoji,
+        },
       });
     },
   };
