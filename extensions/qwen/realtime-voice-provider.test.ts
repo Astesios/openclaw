@@ -49,6 +49,7 @@ describe("Qwen realtime tool contract", () => {
     expect(supportsQwenRealtimeToolCalls("qwen3.5-omni-flash-realtime")).toBe(true);
     expect(supportsQwenRealtimeToolCalls("qwen3.5-omni-plus-realtime")).toBe(true);
     expect(supportsQwenRealtimeToolCalls("qwen3.5-omni-flash-realtime-2026-02-23")).toBe(true);
+    expect(supportsQwenRealtimeToolCalls("qwen3.8-omni-flash-realtime")).toBe(true);
     expect(supportsQwenRealtimeToolCalls("qwen3-omni-flash-realtime")).toBe(false);
     expect(supportsQwenRealtimeToolCalls("qwen3.5-omni-flash")).toBe(false);
     expect(supportsQwenRealtimeToolCalls("qwen3.5-omni-pro-realtime")).toBe(false);
