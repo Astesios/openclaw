@@ -268,6 +268,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     includeInOpenClawGroup: true,
   },
   {
+    id: "agent_creator",
+    label: "agent_creator",
+    description: "Read agent creation catalogs or create an explicitly confirmed agent draft",
+    sectionId: "agents",
+    profiles: ["minimal", "coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
+  {
     id: "get_goal",
     label: "get_goal",
     description: "Get current thread goal",

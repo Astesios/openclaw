@@ -740,6 +740,18 @@ export async function isWorkspaceSetupCompleted(dir: string): Promise<boolean> {
   return typeof state.setupCompletedAt === "string" && state.setupCompletedAt.trim().length > 0;
 }
 
+/** Mark a fully materialized workspace complete without running BOOTSTRAP.md onboarding. */
+export async function markWorkspaceSetupCompleted(dir: string): Promise<void> {
+  const resolvedDir = resolveUserPath(dir);
+  const statePath = resolveWorkspaceStatePath(resolvedDir);
+  const state = await readWorkspaceSetupStateForDir(resolvedDir);
+  await fs.rm(path.join(resolvedDir, DEFAULT_BOOTSTRAP_FILENAME), { force: true });
+  await writeWorkspaceSetupState(statePath, {
+    ...state,
+    setupCompletedAt: new Date().toISOString(),
+  });
+}
+
 export async function resolveWorkspaceBootstrapStatus(
   dir: string,
 ): Promise<"pending" | "complete"> {

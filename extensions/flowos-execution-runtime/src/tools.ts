@@ -22,6 +22,7 @@ import type { SpaceArtifactValidation } from "./validation.js";
 
 const activeStatuses = new Set(["QUEUED", "PLANNING", "RUNNING", "AWAITING_USER", "PAUSED"]);
 const plannedRoutebookTaskKind = "ROUTEBOOK_GENERATION";
+const autonomousAgentCreationTaskKind = "AGENT_CREATION";
 const routebookRunTimeoutSeconds = 30 * 60;
 const errorCodes = [
   "AUTHORIZATION_DENIED",
@@ -589,6 +590,63 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
     },
   };
 
+  const finish: AnyAgentTool = {
+    name: "flowos_execution_finish",
+    label: "FlowOS Execution Finish",
+    description:
+      "Complete a direct AGENT_CREATION Execution with the newly created Agent as its stable resource.",
+    executionMode: "sequential",
+    parameters: Type.Object(
+      {
+        executionId: Type.String({ minLength: 1, maxLength: 128 }),
+        attemptId: Type.String({ minLength: 1, maxLength: 128 }),
+        resourceId: Type.String({ minLength: 1, maxLength: 128 }),
+      },
+      { additionalProperties: false },
+    ),
+    async execute(_toolCallId, args) {
+      const params = args as {
+        executionId: string;
+        attemptId: string;
+        resourceId: string;
+      };
+      return await deps.locks.run(params.executionId, params.attemptId, async () => {
+        const sessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
+        const binding = await deps.bindings.byExecution(params.executionId, params.attemptId);
+        if (!binding) {
+          throw new Error("FlowOS Execution binding not found");
+        }
+        requireOwnerBinding(binding, sessionKey, deps.ownerAgentId);
+        if (binding.taskKind !== autonomousAgentCreationTaskKind || binding.targetAgentId) {
+          throw new Error("FlowOS Execution direct completion is unavailable for this task");
+        }
+        const current = await requireCurrentExecution(deps, binding);
+        const resultRef = await deps.client.registerResource(params.executionId, {
+          resourceId: params.resourceId,
+          resourceKind: "GENERIC",
+        });
+        const latest = await requireCurrentExecution(deps, binding);
+        if (latest.version < current.version) {
+          throw new Error("FlowOS Execution version regressed before completion");
+        }
+        const item = await deps.client.complete({
+          executionId: params.executionId,
+          expectedVersion: latest.version,
+          resultRef,
+        });
+        const completed: RunBinding = {
+          ...binding,
+          status: "ENDED_OK",
+          outcome: `resource:${params.resourceId}`,
+          updatedAt: Date.now(),
+        };
+        await deps.bindings.save(completed);
+        deps.runtime.markTerminal(completed);
+        return jsonResult(item);
+      });
+    },
+  };
+
   const fail: AnyAgentTool = {
     name: "flowos_execution_fail",
     label: "FlowOS Execution Fail",
@@ -636,5 +694,5 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
     },
   };
 
-  return [start, stage, spawn, complete, fail];
+  return [start, stage, spawn, complete, finish, fail];
 }

@@ -592,6 +592,8 @@ export function createGatewaySubagentRuntime(): PluginRuntime["subagent"] {
           ...(params.extraSystemPrompt && { extraSystemPrompt: params.extraSystemPrompt }),
           ...(params.lane && { lane: params.lane }),
           ...(params.lightContext === true && { bootstrapContextMode: "lightweight" }),
+          ...(params.modelRun === true && { modelRun: true }),
+          ...(params.promptMode && { promptMode: params.promptMode }),
           ...(typeof params.runTimeoutSeconds === "number" &&
             Number.isFinite(params.runTimeoutSeconds) && {
               timeout: Math.max(0, Math.floor(params.runTimeoutSeconds)),

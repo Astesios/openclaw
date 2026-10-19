@@ -16,11 +16,7 @@ import {
   validateAgentsUpdateParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import { findOverlappingWorkspaceAgentIds } from "../../agents/agent-delete-safety.js";
-import {
-  listAgentIds,
-  resolveAgentDir,
-  resolveAgentWorkspaceDir,
-} from "../../agents/agent-scope.js";
+import { listAgentIds, resolveAgentWorkspaceDir } from "../../agents/agent-scope.js";
 import { mergeIdentityMarkdownContent } from "../../agents/identity-file.js";
 import { resolveAgentIdentity } from "../../agents/identity.js";
 import {
@@ -51,8 +47,16 @@ import { isAvatarImageDataUrl, isWorkspaceRelativeAvatarPath } from "../../share
 import { resolveUserPath } from "../../utils.js";
 import { listAgentsForGateway } from "../session-utils.js";
 import {
+  AgentCreateServiceError,
+  createAgentWithService,
+  testing as agentCreateServiceTesting,
+} from "./agent-create-service.js";
+import {
+  startAgentCreatorOperation,
+  waitForAgentCreatorOperation,
+} from "./agent-creator-autonomous.js";
+import {
   AgentConfigPreconditionError,
-  createAgentConfigEntry,
   deleteAgentConfigEntry,
   isConfiguredAgent,
   updateAgentConfigEntry,
@@ -90,11 +94,13 @@ export const testing = {
     }
     if (overrides.root) {
       agentsHandlerDeps.root = overrides.root;
+      agentCreateServiceTesting.setDepsForTests({ root: overrides.root });
     }
   },
   resetDepsForTests() {
     agentsHandlerDeps.root = root;
     agentsHandlerDeps.isWorkspaceSetupCompleted = isWorkspaceSetupCompleted;
+    agentCreateServiceTesting.resetDepsForTests();
   },
 };
 
@@ -491,6 +497,74 @@ async function buildIdentityMarkdownOrRespondUnsafe(params: {
 }
 
 export const agentsHandlers: GatewayRequestHandlers = {
+  "agents.creator.start": async ({ params, respond }) => {
+    const input = params as Record<string, unknown>;
+    const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
+    const name = typeof input.name === "string" ? input.name.trim() : "";
+    const purpose = typeof input.purpose === "string" ? input.purpose.trim() : "";
+    const avatarProfileId =
+      typeof input.avatarProfileId === "string" ? input.avatarProfileId.trim() : "";
+    const validAvatarIds = new Set(["cat", "rabbit", "flame", "dog", "koala", "tiger"]);
+    if (
+      Object.keys(input).length !== 4 ||
+      !/^agent-create-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        requestId,
+      ) ||
+      !name ||
+      name.length > 128 ||
+      /[\r\n]/.test(name) ||
+      !purpose ||
+      purpose.length > 1000 ||
+      !validAvatarIds.has(avatarProfileId)
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "invalid agents.creator.start params"),
+      );
+      return;
+    }
+    try {
+      const started = await startAgentCreatorOperation({
+        requestId,
+        name,
+        purpose,
+        avatarProfileId,
+      });
+      respond(true, started, undefined);
+    } catch (error) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.UNAVAILABLE,
+          error instanceof Error ? error.message : "agent creation runtime is unavailable",
+        ),
+      );
+    }
+  },
+  "agents.creator.wait": async ({ params, respond }) => {
+    const input = params as Record<string, unknown>;
+    const requestId = typeof input.requestId === "string" ? input.requestId.trim() : "";
+    const timeoutMs = typeof input.timeoutMs === "number" ? input.timeoutMs : Number.NaN;
+    if (
+      Object.keys(input).length !== 2 ||
+      !/^agent-create-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        requestId,
+      ) ||
+      !Number.isInteger(timeoutMs) ||
+      timeoutMs < 1_000 ||
+      timeoutMs > 920_000
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, "invalid agents.creator.wait params"),
+      );
+      return;
+    }
+    respond(true, await waitForAgentCreatorOperation({ requestId, timeoutMs }), undefined);
+  },
   "agents.list": async ({ params, respond, context }) => {
     if (!validateAgentsListParams(params)) {
       respondInvalidMethodParams(respond, "agents.list", validateAgentsListParams.errors);
@@ -531,77 +605,44 @@ export const agentsHandlers: GatewayRequestHandlers = {
       return;
     }
 
-    const workspaceDir = resolveUserPath(params.workspace.trim());
-
     const safeName = sanitizeIdentityLine(rawName);
     const model = resolveOptionalStringParam(params.model);
-    const identity = createAgentIdentityConfig({
-      safeName,
-      emoji: params.emoji,
-      avatar: params.avatar,
-    }) ?? { name: safeName };
-
-    // Resolve agentDir against the config we're about to persist (vs the pre-write config),
-    // so subsequent resolutions can't disagree about the agent's directory.
-    let nextConfig = applyAgentConfig(cfg, {
-      agentId,
-      name: safeName,
-      workspace: workspaceDir,
-      model,
-      identity,
-    });
-    const agentDir = resolveAgentDir(nextConfig, agentId);
-    nextConfig = applyAgentConfig(nextConfig, { agentId, agentDir });
-
-    // Ensure workspace & transcripts exist BEFORE writing config so a failure
-    // here does not leave a broken config entry behind.
-    const skipBootstrap = Boolean(nextConfig.agents?.defaults?.skipBootstrap);
-    await ensureAgentWorkspace({
-      dir: workspaceDir,
-      ensureBootstrapFiles: !skipBootstrap,
-      skipOptionalBootstrapFiles: nextConfig.agents?.defaults?.skipOptionalBootstrapFiles,
-    });
-    await fs.mkdir(resolveSessionTranscriptsDirForAgent(agentId), { recursive: true });
-
-    const persistedIdentity = normalizeIdentityForFile(resolveAgentIdentity(nextConfig, agentId));
-    if (persistedIdentity) {
-      const identityContent = await buildIdentityMarkdownOrRespondUnsafe({
-        respond,
-        workspaceDir,
-        identity: persistedIdentity,
-      });
-      if (identityContent === null) {
-        return;
-      }
-      if (
-        !(await writeWorkspaceFileOrRespond({
-          respond,
-          workspaceDir,
-          name: DEFAULT_IDENTITY_FILENAME,
-          content: identityContent,
-        }))
-      ) {
-        return;
-      }
-    }
     try {
-      await createAgentConfigEntry({
-        agentId,
+      const created = await createAgentWithService({
+        mode: "legacy",
+        cfg,
         name: safeName,
-        workspace: workspaceDir,
+        workspace: params.workspace,
         model,
-        identity,
-        agentDir,
+        emoji: resolveOptionalStringParam(params.emoji),
+        avatar: resolveOptionalStringParam(params.avatar),
       });
+      respond(
+        true,
+        {
+          ok: true,
+          agentId: created.agentId,
+          name: created.name,
+          workspace: created.workspace,
+          model: created.model,
+        },
+        undefined,
+      );
     } catch (error) {
       if (error instanceof AgentConfigPreconditionError) {
         respondAgentConfigPreconditionError(respond, error);
         return;
       }
+      if (error instanceof AgentCreateServiceError) {
+        respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, error.message));
+        return;
+      }
+      if (error instanceof FsSafeError) {
+        respondWorkspaceFileUnsafe(respond, DEFAULT_IDENTITY_FILENAME);
+        return;
+      }
       throw error;
     }
-
-    respond(true, { ok: true, agentId, name: safeName, workspace: workspaceDir, model }, undefined);
   },
   "agents.update": async ({ params, respond, context }) => {
     if (!validateAgentsUpdateParams(params)) {
