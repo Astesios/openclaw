@@ -1250,6 +1250,7 @@ function resolveGatewayAgentModel(
 export function listAgentsForGateway(
   cfg: OpenClawConfig,
   modelCatalog?: ModelCatalogEntry[],
+  options?: { includeAvatarData?: boolean },
 ): {
   defaultId: string;
   mainKey: string;
@@ -1268,17 +1269,18 @@ export function listAgentsForGateway(
       continue;
     }
     const configuredName = normalizeOptionalString(entry.name);
+    const avatar = normalizeOptionalString(entry.identity?.avatar);
+    const includeAvatarData = options?.includeAvatarData !== false;
     const identity = entry.identity
       ? {
           name: normalizeOptionalString(entry.identity.name),
           theme: normalizeOptionalString(entry.identity.theme),
           emoji: normalizeOptionalString(entry.identity.emoji),
-          avatar: normalizeOptionalString(entry.identity.avatar),
-          avatarUrl: resolveIdentityAvatarUrl(
-            cfg,
-            normalizeAgentId(entry.id),
-            normalizeOptionalString(entry.identity.avatar),
-          ),
+          // Directory polling needs the profile path, not file reads or inline bytes.
+          avatar: !includeAvatarData && avatar && isAvatarDataUrl(avatar) ? undefined : avatar,
+          avatarUrl: includeAvatarData
+            ? resolveIdentityAvatarUrl(cfg, normalizeAgentId(entry.id), avatar)
+            : undefined,
         }
       : undefined;
     configuredById.set(normalizeAgentId(entry.id), {

@@ -1529,6 +1529,39 @@ describe("gateway session utils", () => {
     );
   });
 
+  test("listAgentsForGateway omits avatar bytes for a large lightweight directory", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "session-utils-avatar-light-"));
+    const avatarPath = path.join(root, "rabbit.png");
+    fs.writeFileSync(avatarPath, Buffer.alloc(1024 * 1024, 1));
+    const cfg = {
+      agents: {
+        list: Array.from({ length: 32 }, (_, i) => ({
+          id: i === 0 ? "main" : `rabbit-${i}`,
+          workspace: root,
+          identity: { avatar: i === 31 ? "data:image/png;base64,AAAA" : "rabbit.png" },
+        })),
+      },
+    } as OpenClawConfig;
+    const read = vi.spyOn(fs, "readFileSync");
+    try {
+      const result = listAgentsForGateway(cfg, undefined, { includeAvatarData: false });
+      expect(result.agents).toHaveLength(32);
+      expect(result.agents[1]?.identity?.avatar).toBe("rabbit.png");
+      expect(result.agents.every((agent) => agent.identity?.avatarUrl === undefined)).toBe(true);
+      expect(
+        result.agents.find((agent) => agent.id === "rabbit-31")?.identity?.avatar,
+      ).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain("data:image");
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(64 * 1024);
+      expect(
+        read.mock.calls.some(([file]) => file === avatarPath || typeof file === "number"),
+      ).toBe(false);
+    } finally {
+      read.mockRestore();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("listAgentsForGateway falls back to identity.name when name is unset", () => {
     const cfg = {
       session: { mainKey: "main" },

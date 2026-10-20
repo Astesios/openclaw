@@ -4885,7 +4885,19 @@ public struct ArtifactsDownloadResult: Codable, Sendable {
     }
 }
 
-public struct AgentsListParams: Codable, Sendable {}
+public struct AgentsListParams: Codable, Sendable {
+    public let includeavatardata: Bool?
+
+    public init(
+        includeavatardata: Bool? = nil)
+    {
+        self.includeavatardata = includeavatardata
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case includeavatardata = "includeAvatarData"
+    }
+}
 
 public struct AgentsListResult: Codable, Sendable {
     public let defaultid: String

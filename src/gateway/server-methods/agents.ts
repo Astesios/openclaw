@@ -575,7 +575,9 @@ export const agentsHandlers: GatewayRequestHandlers = {
     const modelCatalog = await loadOptionalServerMethodModelCatalog(context, "agents.list", {
       logOnceKey: "agents.list",
     });
-    const result = listAgentsForGateway(cfg, modelCatalog);
+    const result = listAgentsForGateway(cfg, modelCatalog, {
+      includeAvatarData: params.includeAvatarData,
+    });
     respond(true, result, undefined);
   },
   "agents.create": async ({ params, respond, context }) => {
