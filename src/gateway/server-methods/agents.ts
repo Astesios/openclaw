@@ -504,7 +504,6 @@ export const agentsHandlers: GatewayRequestHandlers = {
     const purpose = typeof input.purpose === "string" ? input.purpose.trim() : "";
     const avatarProfileId =
       typeof input.avatarProfileId === "string" ? input.avatarProfileId.trim() : "";
-    const validAvatarIds = new Set(["cat", "rabbit", "flame", "dog", "koala", "tiger"]);
     if (
       Object.keys(input).length !== 4 ||
       !/^agent-create-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
@@ -515,7 +514,7 @@ export const agentsHandlers: GatewayRequestHandlers = {
       /[\r\n]/.test(name) ||
       !purpose ||
       purpose.length > 1000 ||
-      !validAvatarIds.has(avatarProfileId)
+      !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(avatarProfileId)
     ) {
       respond(
         false,
