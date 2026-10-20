@@ -13,6 +13,24 @@ import {
 } from "./agent-consult-tool.js";
 
 describe("realtime voice agent consult tool", () => {
+  it("requires a brief spoken acknowledgement before realtime consult", () => {
+    expect(REALTIME_VOICE_AGENT_CONSULT_TOOL.description).toContain(
+      "Before emitting this function call, you MUST first speak one brief, natural acknowledgement",
+    );
+    expect(REALTIME_VOICE_AGENT_CONSULT_TOOL.description).toContain(
+      "Generate that acknowledgement from the caller's actual request and conversation context",
+    );
+    expect(REALTIME_VOICE_AGENT_CONSULT_TOOL.description).toContain(
+      "Do not use a canned or fixed acknowledgement",
+    );
+    expect(REALTIME_VOICE_AGENT_CONSULT_TOOL.description).toContain(
+      "Do not emit this function call until that brief spoken acknowledgement has been produced",
+    );
+    expect(REALTIME_VOICE_AGENT_CONSULT_TOOL.description).toContain(
+      "Do not claim that the request is running in the background",
+    );
+  });
+
   it("normalizes shared tool arguments for browser chat forwarding", () => {
     expect(
       buildRealtimeVoiceAgentConsultChatMessage({

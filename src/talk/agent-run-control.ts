@@ -20,6 +20,11 @@ import {
   type RealtimeVoiceAgentControlResult,
   type RealtimeVoiceAgentRunActivity,
 } from "./agent-run-control-shared.js";
+import {
+  formatRealtimeExecutionStatus,
+  isActiveRealtimeExecutionFeedback,
+  type RealtimeExecutionFeedback,
+} from "./execution-feedback.js";
 import type { TalkEvent } from "./talk-events.js";
 
 export {
@@ -68,6 +73,7 @@ export async function controlRealtimeVoiceAgentRun(
     text: string;
     mode?: unknown;
     recentEvents?: readonly TalkEvent[];
+    executionFeedback?: readonly RealtimeExecutionFeedback[];
   },
   deps: RealtimeVoiceAgentControlDeps = defaultDeps,
 ): Promise<RealtimeVoiceAgentControlResult> {
@@ -77,7 +83,15 @@ export async function controlRealtimeVoiceAgentRun(
   const mode = intent.mode;
   const sessionId = deps.resolveActiveEmbeddedRunSessionId(sessionKey);
   const activity = deps.getDiagnosticSessionActivitySnapshot({ sessionId, sessionKey });
-  const active = Boolean(sessionId || activity.activeWorkKind || activity.hasActiveEmbeddedRun);
+  const feedback = [...(params.executionFeedback ?? [])].toSorted(
+    (a, b) => b.updatedAt - a.updatedAt,
+  );
+  const activeExecution = feedback.find(isActiveRealtimeExecutionFeedback);
+  const recentTerminalExecution = feedback.find((item) => !isActiveRealtimeExecutionFeedback(item));
+  const execution = activeExecution ?? recentTerminalExecution;
+  const active = Boolean(
+    sessionId || activeExecution || activity.activeWorkKind || activity.hasActiveEmbeddedRun,
+  );
 
   // Status is read-only and can answer from diagnostic activity even when the
   // active embedded run id has already disappeared.
@@ -88,11 +102,14 @@ export async function controlRealtimeVoiceAgentRun(
       sessionKey,
       ...(sessionId ? { sessionId } : {}),
       active,
-      message: formatRealtimeVoiceAgentStatus({
-        active,
-        recentEvents: params.recentEvents,
-        activity,
-      }),
+      message:
+        !sessionId && execution
+          ? formatRealtimeExecutionStatus(execution)
+          : formatRealtimeVoiceAgentStatus({
+              active,
+              recentEvents: params.recentEvents,
+              activity,
+            }),
       speak: true,
       show: true,
       suppress: false,

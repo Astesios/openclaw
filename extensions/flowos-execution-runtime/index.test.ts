@@ -1,6 +1,7 @@
 import type { AnyAgentTool } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { RealtimeExecutionFeedback } from "openclaw/plugin-sdk/realtime-voice";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin, {
   deliverExecutionResultCard,
@@ -259,6 +260,7 @@ function tools(params?: {
   runtime?: FlowosExecutionRuntime;
   validateArtifact?: ArtifactValidator;
   deliverResultCard?: ResultCardDelivery;
+  publishRealtimeExecutionFeedback?: (feedback: RealtimeExecutionFeedback) => void;
 }) {
   const assist = params?.client ? { client: params.client } : fakeClient();
   const bindings = params?.bindings ?? new RunBindingStore(memoryStore());
@@ -288,6 +290,8 @@ function tools(params?: {
           filePath: plan.artifactCandidateFilePath,
           artifactType: plan.artifactType,
         }),
+      undefined,
+      params?.publishRealtimeExecutionFeedback,
     );
   const created = createFlowosExecutionTools({
     api: { runtime: { subagent } } as never,
@@ -301,6 +305,7 @@ function tools(params?: {
     locks,
     runtime,
     ownerAgentId: "agent:main",
+    publishRealtimeExecutionFeedback: params?.publishRealtimeExecutionFeedback,
     validateArtifact,
   });
   return {
@@ -619,6 +624,38 @@ describe("FlowOS Execution plugin boundaries", () => {
       context: { agentId: "main", sessionKey: "agent:main:other" },
     });
     await expect(startExecution(other.byName)).rejects.toThrow("another owner session");
+  });
+
+  it("keeps feedback disabled by default and publishes an opt-in realtime start snapshot", async () => {
+    const defaultPublisher = vi.fn<(feedback: RealtimeExecutionFeedback) => void>();
+    const defaultOwner = tools({ publishRealtimeExecutionFeedback: defaultPublisher });
+    await startExecution(defaultOwner.byName);
+    expect(defaultPublisher).not.toHaveBeenCalled();
+
+    const realtimePublisher = vi.fn<(feedback: RealtimeExecutionFeedback) => void>();
+    const realtimeOwner = tools({ publishRealtimeExecutionFeedback: realtimePublisher });
+    await realtimeOwner.byName.get("flowos_execution_start")?.execute("start", {
+      source: "USER",
+      taskKind: "ROUTEBOOK_GENERATION",
+      title: "生成路书",
+      idempotencyKey: "request-realtime-1",
+      feedbackPolicy: "REALTIME_CALL_DEFERRED",
+    });
+
+    expect(realtimePublisher).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: "agent:main:main",
+        executionId: "execution-1",
+        attemptId: "attempt-1",
+        title: "生成路书",
+        taskKind: "ROUTEBOOK_GENERATION",
+        disposition: "STATUS_ONLY",
+      }),
+    );
+    expect(await realtimeOwner.bindings.byExecution("execution-1", "attempt-1")).toMatchObject({
+      title: "生成路书",
+      feedbackPolicy: "REALTIME_CALL_DEFERRED",
+    });
   });
 
   it("scopes Assist idempotency to the trusted requester session when local state is empty", async () => {

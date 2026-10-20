@@ -39,6 +39,10 @@ export const REALTIME_VOICE_AGENT_CONSULT_TOOL: RealtimeVoiceTool = {
   name: REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   description:
     "Delegate the caller's request to the configured OpenClaw agent, then speak its result. " +
+    "Before emitting this function call, you MUST first speak one brief, natural acknowledgement to the caller in the same response. Generate that acknowledgement from the caller's actual request and conversation context: state the concrete action you are starting and its subject, in the caller's language, and ask them to wait only when appropriate. Do not use a canned or fixed acknowledgement. " +
+    "Do not emit this function call until that brief spoken acknowledgement has been produced. " +
+    "Do not claim that the request is running in the background or has completed, because only the OpenClaw agent can determine that. " +
+    "After the tool result arrives, speak the actual result directly without repeating the waiting message. " +
     "You MUST call this (do NOT answer yourself) for: " +
     "(1) querying tasks, spaces, plans, or any existing artifact's details; " +
     "(2) making a plan, generating a route book / document / itinerary, or creating a space; " +

@@ -13,6 +13,8 @@ export type ActiveExecution = {
   status: string;
   version: number;
   stageKey: string;
+  stageLabel?: string | null;
+  progress?: number | null;
   resultRef?: { type: string; id: string; spaceId?: string | null } | null;
 };
 

@@ -23,6 +23,11 @@ export type {
   RealtimeVoiceToolResultOptions,
 } from "../talk/provider-types.js";
 export {
+  publishRealtimeExecutionFeedback,
+  type RealtimeExecutionFeedback,
+  type RealtimeExecutionFeedbackDisposition,
+} from "../talk/execution-feedback.js";
+export {
   REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
   REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
 } from "../talk/provider-types.js";
