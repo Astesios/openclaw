@@ -3,6 +3,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { injectMessageBySessionKey } from "openclaw/plugin-sdk/celia-card-inject";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { publishRealtimeExecutionFeedback } from "openclaw/plugin-sdk/realtime-voice";
 import { RunBindingStore } from "./src/bindings.js";
 import {
   createAssistRequest,
@@ -237,6 +238,7 @@ export default definePluginEntry({
           spaceId: plan.spaceId,
           candidateFilePath: plan.artifactCandidateFilePath,
         }),
+      publishRealtimeExecutionFeedback,
     );
 
     api.registerTool(
@@ -250,6 +252,7 @@ export default definePluginEntry({
           locks,
           runtime,
           ownerAgentId,
+          publishRealtimeExecutionFeedback,
           validateArtifact: (params) => {
             const workspaceDir = context.workspaceDir?.trim();
             if (!workspaceDir) {

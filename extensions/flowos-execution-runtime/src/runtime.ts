@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { PluginRuntime } from "openclaw/plugin-sdk/plugin-runtime";
+import type { RealtimeExecutionFeedback } from "openclaw/plugin-sdk/realtime-voice";
 import {
   type FinalizationPlan,
   RunBindingStore,
@@ -105,7 +106,46 @@ export class FlowosExecutionRuntime {
     private readonly locks: ExecutionLocks,
     private readonly validatePlannedArtifact?: PlannedArtifactValidator,
     private readonly discardPlannedArtifact?: PlannedArtifactDiscarder,
+    private readonly publishRealtimeExecutionFeedback?: (
+      feedback: RealtimeExecutionFeedback,
+    ) => void,
   ) {}
+
+  private publishFeedback(
+    binding: RunBinding,
+    item: ActiveExecution,
+    disposition: RealtimeExecutionFeedback["disposition"],
+    idempotencyKey: string,
+    resultAvailable = false,
+  ): void {
+    if (
+      binding.feedbackPolicy !== "REALTIME_CALL_DEFERRED" ||
+      !this.publishRealtimeExecutionFeedback
+    ) {
+      return;
+    }
+    try {
+      this.publishRealtimeExecutionFeedback({
+        sessionKey: binding.requesterSessionKey,
+        executionId: binding.executionId,
+        attemptId: binding.attemptId,
+        taskKind: binding.taskKind,
+        title: binding.title,
+        status: item.status,
+        stageKey: item.stageKey,
+        stageLabel: item.stageLabel ?? undefined,
+        progress: item.progress ?? undefined,
+        updatedAt: Date.now(),
+        disposition,
+        idempotencyKey,
+        resultAvailable,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `FlowOS realtime Execution feedback publish failed for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+      );
+    }
+  }
 
   async subagentEnded(event: EndedEvent, ctx: SubagentContext): Promise<void> {
     if (event.targetKind !== "subagent") {
@@ -230,6 +270,12 @@ export class FlowosExecutionRuntime {
         await this.bindings.save(stopped);
         stoppedBinding = stopped;
         this.markTerminal(stopped);
+        this.publishFeedback(
+          stopped,
+          item,
+          "STATUS_ONLY",
+          `flowos-execution:${executionId}:${attemptId}:cancelled`,
+        );
       }
       return item;
     });
@@ -367,11 +413,17 @@ export class FlowosExecutionRuntime {
     try {
       const detail = await latestStillNeedsSync(this.client, binding);
       if (detail) {
-        await this.client.fail(binding.executionId, {
+        const failed = await this.client.fail(binding.executionId, {
           expectedVersion: detail.version,
           errorCode: "INTERNAL",
           retryable: true,
         });
+        this.publishFeedback(
+          binding,
+          failed,
+          "STATUS_ONLY",
+          `flowos-execution:${binding.executionId}:${binding.attemptId}:spawn-failed`,
+        );
       }
       await this.bindings.save({
         ...binding,
@@ -450,6 +502,12 @@ export class FlowosExecutionRuntime {
               progress: 0.95,
             });
             syncedVersion = validating.version;
+            this.publishFeedback(
+              binding,
+              { ...validating, stageLabel: "正在验证结果", progress: 0.95 },
+              "STATUS_ONLY",
+              `flowos-execution:${binding.executionId}:${binding.attemptId}:validating`,
+            );
           }
         } else {
           const failure = errorForOutcome(binding.outcome);
@@ -458,6 +516,12 @@ export class FlowosExecutionRuntime {
             ...failure,
           });
           syncedVersion = failed.version;
+          this.publishFeedback(
+            binding,
+            failed,
+            "STATUS_ONLY",
+            `flowos-execution:${binding.executionId}:${binding.attemptId}:failed:${binding.outcome ?? "error"}`,
+          );
           await this.discardCandidate(binding);
         }
       }
@@ -694,12 +758,13 @@ export class FlowosExecutionRuntime {
       throw new Error("FlowOS Execution planned failure is unavailable");
     }
     const detail = await this.client.detail(binding.executionId);
+    let terminalDetail = detail;
     if (
       detail.currentAttemptId === binding.attemptId &&
       detail.ownerAgentId === binding.ownerAgentId &&
       activeStatuses.has(detail.status)
     ) {
-      await this.client.fail(binding.executionId, {
+      terminalDetail = await this.client.fail(binding.executionId, {
         expectedVersion: detail.version,
         errorCode: failure.errorCode,
         retryable: failure.retryable,
@@ -713,6 +778,12 @@ export class FlowosExecutionRuntime {
     };
     await this.bindings.save(failed);
     this.markTerminal(failed);
+    this.publishFeedback(
+      failed,
+      { ...terminalDetail, status: "FAILED", stageKey: "failed" },
+      "ANNOUNCE_WHEN_IDLE",
+      `flowos-execution:${binding.executionId}:${binding.attemptId}:failed:${failure.errorCode}`,
+    );
   }
 
   private async deferPlannedFinalizationLocked(binding: RunBinding): Promise<void> {
@@ -744,11 +815,17 @@ export class FlowosExecutionRuntime {
     }
     const detail = await latestStillNeedsSync(this.client, current);
     if (detail) {
-      await this.client.fail(current.executionId, {
+      const failedDetail = await this.client.fail(current.executionId, {
         expectedVersion: detail.version,
         errorCode: "INTERNAL",
         retryable: true,
       });
+      this.publishFeedback(
+        current,
+        failedDetail,
+        "ANNOUNCE_WHEN_IDLE",
+        `flowos-execution:${current.executionId}:${current.attemptId}:failed:planned-finalization`,
+      );
     }
     const failed: RunBinding = {
       ...current,
@@ -816,6 +893,13 @@ export class FlowosExecutionRuntime {
     };
     await this.bindings.save(delivered);
     this.markTerminal(delivered);
+    this.publishFeedback(
+      delivered,
+      detail,
+      binding.finalizationPlan ? "ANNOUNCE_WHEN_IDLE" : "STATUS_ONLY",
+      `flowos-execution:${binding.executionId}:${binding.attemptId}:succeeded`,
+      true,
+    );
     return detail;
   }
 

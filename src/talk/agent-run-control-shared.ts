@@ -36,7 +36,7 @@ export const REALTIME_VOICE_AGENT_CONTROL_TOOL: RealtimeVoiceTool = {
   type: "function",
   name: REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
   description:
-    "Control an active OpenClaw tool-backed voice run. Use this when the caller asks in any language for status/progress, cancellation, a redirect/change to the active work, or a follow-up after the current work. Do not use this for ordinary greetings or chatter unless the caller is asking about the active work.",
+    "Control an active OpenClaw tool-backed voice run or report a background Execution snapshot. Use this when the caller asks in any language for status/progress, cancellation, a redirect/change to the active work, or a follow-up after the current work. Do not use this for ordinary greetings or chatter unless the caller is asking about the active work.",
   parameters: {
     type: "object",
     properties: {
@@ -123,6 +123,7 @@ const STATUS_CONTROL_PATTERNS = [
   /^(?:(?:ok|okay|alright|all right)[,\s]+)?(?:status|progress|update)(?:\s*[.!?])?$/,
   /^(?:(?:ok|okay|alright|all right)[,\s]+)?(?:give me|what'?s|any)\s+(?:an?\s+)?update(?:\s*[.!?])?$/,
   /^(?:(?:ok|okay|alright|all right)[,\s]+)?(where are we|what'?s happening|what (?:are you|is it) doing|what'?s it doing|how (?:is|are) (?:it|you|that|this) going|how'?s it going|are you still working|is it done|did it finish)(\b|[.!?])/,
+  /^(?:[^？?。！!]{1,40})?(?:完成了吗|好了吗|做完了吗|进度怎么样|还在处理吗)[？?。！!]*$/,
 ] as const;
 
 const FOLLOWUP_CONTROL_PATTERNS = [

@@ -6,10 +6,12 @@ import type {
   OpenClawPluginApi,
   OpenClawPluginToolContext,
 } from "openclaw/plugin-sdk/plugin-entry";
+import type { RealtimeExecutionFeedback } from "openclaw/plugin-sdk/realtime-voice";
 import { isSubagentSessionKey } from "openclaw/plugin-sdk/routing";
 import { Type } from "typebox";
 import {
   childSessionKey,
+  type ExecutionFeedbackPolicy,
   type FinalizationPlan,
   normalizeChildAgentId,
   type RunBinding,
@@ -50,7 +52,45 @@ type ToolDeps = {
     filePath: string;
     artifactType: "html" | "markdown";
   }) => Promise<SpaceArtifactValidation>;
+  publishRealtimeExecutionFeedback?: (feedback: RealtimeExecutionFeedback) => void;
 };
+
+function publishFeedback(
+  deps: ToolDeps,
+  binding: RunBinding,
+  item: ActiveExecution,
+  disposition: RealtimeExecutionFeedback["disposition"],
+  idempotencyKey: string,
+  resultAvailable = false,
+): void {
+  if (
+    binding.feedbackPolicy !== "REALTIME_CALL_DEFERRED" ||
+    !deps.publishRealtimeExecutionFeedback
+  ) {
+    return;
+  }
+  try {
+    deps.publishRealtimeExecutionFeedback({
+      sessionKey: binding.requesterSessionKey,
+      executionId: binding.executionId,
+      attemptId: binding.attemptId,
+      taskKind: binding.taskKind,
+      title: binding.title,
+      status: item.status,
+      stageKey: item.stageKey,
+      stageLabel: item.stageLabel ?? undefined,
+      progress: item.progress ?? undefined,
+      updatedAt: Date.now(),
+      disposition,
+      idempotencyKey,
+      resultAvailable,
+    });
+  } catch (error) {
+    deps.api.logger.warn(
+      `FlowOS realtime Execution feedback publish failed for ${binding.executionId}: ${error instanceof Error ? error.message : "error"}`,
+    );
+  }
+}
 
 function requireSession(context: OpenClawPluginToolContext): string {
   const sessionKey = context.sessionKey?.trim();
@@ -200,6 +240,8 @@ function executionBinding(params: {
   requesterSessionKey: string;
   ownerAgentId: string;
   taskKind: string;
+  title: string;
+  feedbackPolicy: ExecutionFeedbackPolicy;
 }): RunBinding {
   const now = Date.now();
   return {
@@ -227,6 +269,9 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         visibilityPolicy: Type.Optional(
           Type.Union([Type.Literal("DEFAULT"), Type.Literal("SUPPRESS_ISLAND_WHILE_CALL_ACTIVE")]),
         ),
+        feedbackPolicy: Type.Optional(
+          Type.Union([Type.Literal("NONE"), Type.Literal("REALTIME_CALL_DEFERRED")]),
+        ),
       },
       { additionalProperties: false },
     ),
@@ -238,6 +283,7 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         idempotencyKey: string;
         spaceId?: string;
         visibilityPolicy?: "DEFAULT" | "SUPPRESS_ISLAND_WHILE_CALL_ACTIVE";
+        feedbackPolicy?: ExecutionFeedbackPolicy;
       };
       const requesterSessionKey = requireOwnerContext(deps.context, deps.ownerAgentId);
       const idempotencyKey = scopedIdempotencyKey(requesterSessionKey, params.idempotencyKey);
@@ -275,10 +321,19 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
             requesterSessionKey,
             ownerAgentId: deps.ownerAgentId,
             taskKind: params.taskKind,
+            title: params.title,
+            feedbackPolicy: params.feedbackPolicy ?? "NONE",
           });
           await deps.bindings.save(binding);
         }
         deps.runtime.watchOwnerSpawn(binding);
+        publishFeedback(
+          deps,
+          binding,
+          item,
+          "STATUS_ONLY",
+          `flowos-execution:${binding.executionId}:${binding.attemptId}:start`,
+        );
         return jsonResult(item);
       });
     },
@@ -345,6 +400,13 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           stageLabel: params.stageLabel,
           ...(params.progress === undefined ? {} : { progress: params.progress }),
         });
+        publishFeedback(
+          deps,
+          binding,
+          { ...item, stageLabel: params.stageLabel, progress: params.progress },
+          "STATUS_ONLY",
+          `flowos-execution:${binding.executionId}:${binding.attemptId}:stage:${item.version}`,
+        );
         return jsonResult(item);
       });
     },
@@ -642,6 +704,13 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
         };
         await deps.bindings.save(completed);
         deps.runtime.markTerminal(completed);
+        publishFeedback(
+          deps,
+          completed,
+          item,
+          "STATUS_ONLY",
+          `flowos-execution:${binding.executionId}:${binding.attemptId}:succeeded`,
+        );
         return jsonResult(item);
       });
     },
@@ -689,6 +758,13 @@ export function createFlowosExecutionTools(deps: ToolDeps): AnyAgentTool[] {
           retryable: params.retryable ?? false,
         });
         await deps.runtime.markOwnerFailed(binding);
+        publishFeedback(
+          deps,
+          binding,
+          item,
+          "STATUS_ONLY",
+          `flowos-execution:${binding.executionId}:${binding.attemptId}:failed:${params.errorCode}`,
+        );
         return jsonResult(item);
       });
     },

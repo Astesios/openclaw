@@ -11,6 +11,8 @@ export type RunBindingStatus =
   | "SPAWN_FAILED_PENDING_SYNC"
   | "SPAWN_FAILED";
 
+export type ExecutionFeedbackPolicy = "NONE" | "REALTIME_CALL_DEFERRED";
+
 export type ResultDelivery = {
   status: "PREPARED" | "EXECUTION_COMPLETED" | "DELIVERED" | "ABORTED";
   expectedVersion: number;
@@ -45,6 +47,8 @@ export type RunBinding = {
   requesterSessionKey: string;
   ownerAgentId: string;
   taskKind?: string;
+  title?: string;
+  feedbackPolicy?: ExecutionFeedbackPolicy;
   targetAgentId?: string;
   childSessionKey?: string;
   runId?: string;

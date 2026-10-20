@@ -57,6 +57,9 @@ describe("classifyRealtimeVoiceAgentControlText", () => {
       "followup",
     );
     expect(classifyRealtimeVoiceAgentControlText("how is it going")).toBe("status");
+    expect(classifyRealtimeVoiceAgentControlText("完成了吗？")).toBe("status");
+    expect(classifyRealtimeVoiceAgentControlText("路书做好了吗？")).toBe("status");
+    expect(shouldAutoControlRealtimeVoiceAgentText("进度怎么样")).toBe(true);
     expect(classifyRealtimeVoiceAgentControlText("All right, how is that going?")).toBe("status");
     expect(classifyRealtimeVoiceAgentControlText("what is it doing")).toBe("status");
     expect(classifyRealtimeVoiceAgentControlText("update the docs too")).toBe("steer");
@@ -118,6 +121,35 @@ describe("classifyRealtimeVoiceAgentControlText", () => {
 });
 
 describe("controlRealtimeVoiceAgentRun", () => {
+  it("reports an Execution terminal snapshot after the consult run has ended", async () => {
+    const result = await controlRealtimeVoiceAgentRun(
+      {
+        sessionKey: "agent:main:main",
+        text: "完成了吗？",
+        mode: "status",
+        executionFeedback: [
+          {
+            sessionKey: "agent:main:main",
+            executionId: "execution-1",
+            attemptId: "attempt-1",
+            title: "生成北京路书",
+            status: "SUCCEEDED",
+            updatedAt: 10,
+            disposition: "STATUS_ONLY",
+            idempotencyKey: "done-1",
+            resultAvailable: true,
+          },
+        ],
+      },
+      createDeps({}),
+    );
+
+    expect(result).toMatchObject({
+      active: false,
+      message: "“生成北京路书”已经完成，结果已经放到卡片里了。",
+    });
+  });
+
   it("queues steering into the active embedded run", async () => {
     const deps = createDeps({ activeSessionId: "session-active" });
 
