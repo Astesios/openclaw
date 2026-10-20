@@ -86,8 +86,11 @@ export const AgentSummarySchema = Type.Object(
   { additionalProperties: false },
 );
 
-/** Empty request payload for listing configured agents. */
-export const AgentsListParamsSchema = Type.Object({}, { additionalProperties: false });
+/** Lists configured agents; omit avatar bytes for lightweight directory polling. */
+export const AgentsListParamsSchema = Type.Object(
+  { includeAvatarData: Type.Optional(Type.Boolean()) },
+  { additionalProperties: false },
+);
 
 /** Agent list result including the default agent and session scoping mode. */
 export const AgentsListResultSchema = Type.Object(

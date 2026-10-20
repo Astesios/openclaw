@@ -2,6 +2,7 @@
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  AgentsListParamsSchema,
   AgentsListResultSchema,
   SkillsProposalInspectResultSchema,
   ToolsEffectiveResultSchema,
@@ -36,6 +37,16 @@ function toolsEffectiveResult() {
     ],
   };
 }
+
+describe("AgentsListParamsSchema", () => {
+  it("accepts legacy and lightweight requests while keeping params strict", () => {
+    for (const params of [{}, { includeAvatarData: true }, { includeAvatarData: false }]) {
+      expect(Value.Check(AgentsListParamsSchema, params)).toBe(true);
+    }
+    expect(Value.Check(AgentsListParamsSchema, { includeAvatarData: "false" })).toBe(false);
+    expect(Value.Check(AgentsListParamsSchema, { unknown: false })).toBe(false);
+  });
+});
 
 describe("AgentsListResultSchema", () => {
   it("accepts resolved per-agent thinking metadata", () => {
