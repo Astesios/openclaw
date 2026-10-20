@@ -185,45 +185,6 @@ function parseInstallSpec(input: unknown): SkillInstallSpec | undefined {
   return spec;
 }
 
-function parseProfessionalAgentTemplate(
-  input: unknown,
-): OpenClawSkillMetadata["professionalAgent"] {
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return undefined;
-  }
-  const raw = input as Record<string, unknown>;
-  const isolation = raw.isolation;
-  const entrySkills = normalizeStringList(raw.entrySkills);
-  if (
-    raw.schemaVersion !== 1 ||
-    typeof raw.templateId !== "string" ||
-    !/^[a-z0-9][a-z0-9-]{0,63}$/.test(raw.templateId) ||
-    typeof raw.templateVersion !== "number" ||
-    !Number.isSafeInteger(raw.templateVersion) ||
-    raw.templateVersion < 1 ||
-    typeof raw.displayName !== "string" ||
-    !raw.displayName.trim() ||
-    typeof raw.description !== "string" ||
-    !raw.description.trim() ||
-    (isolation !== "recommended" && isolation !== "required") ||
-    typeof raw.toolProfile !== "string" ||
-    !raw.toolProfile.trim() ||
-    entrySkills.length === 0
-  ) {
-    return undefined;
-  }
-  return {
-    schemaVersion: 1,
-    templateId: raw.templateId,
-    templateVersion: raw.templateVersion,
-    displayName: raw.displayName.trim(),
-    description: raw.description.trim(),
-    isolation,
-    toolProfile: raw.toolProfile.trim(),
-    entrySkills,
-  };
-}
-
 export function resolveOpenClawMetadata(
   frontmatter: ParsedSkillFrontmatter,
 ): OpenClawSkillMetadata | undefined {
@@ -243,7 +204,6 @@ export function resolveOpenClawMetadata(
     os: osRaw.length > 0 ? osRaw : undefined,
     requires,
     install: install.length > 0 ? install : undefined,
-    professionalAgent: parseProfessionalAgentTemplate(metadataObj.professionalAgent),
   };
 }
 

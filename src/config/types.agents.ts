@@ -156,15 +156,6 @@ export type AgentConfig = {
   tools?: AgentToolsConfig;
   /** Optional runtime descriptor for this agent. */
   runtime?: AgentRuntimeConfig;
-  /** Runtime-owned provenance for agents created from professional Skill recipes. */
-  professionalAgent?: {
-    managed: true;
-    templateId: string;
-    templateVersion: number;
-    sourceSkill: string;
-    sourceDigest: string;
-    toolProfile: string;
-  };
 };
 
 export type AgentsConfig = {

@@ -33,19 +33,3 @@ export function assertValidParams<T>(
   );
   return false;
 }
-
-/** Emit the standard invalid-params response when a method performs validation inline. */
-export function respondInvalidMethodParams(
-  respond: RespondFn,
-  method: string,
-  errors: Parameters<typeof formatValidationErrors>[0],
-): void {
-  respond(
-    false,
-    undefined,
-    errorShape(
-      ErrorCodes.INVALID_REQUEST,
-      `invalid ${method} params: ${formatValidationErrors(errors)}`,
-    ),
-  );
-}

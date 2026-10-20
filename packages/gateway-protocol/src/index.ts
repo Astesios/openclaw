@@ -19,18 +19,6 @@ import {
   AgentsCreateParamsSchema,
   type AgentsCreateResult,
   AgentsCreateResultSchema,
-  type AgentsProvisionConfirmParams,
-  AgentsProvisionConfirmParamsSchema,
-  type AgentsProvisionDismissParams,
-  AgentsProvisionDismissParamsSchema,
-  type AgentsProvisionOperationGetParams,
-  AgentsProvisionOperationGetParamsSchema,
-  type AgentsProvisionProposeParams,
-  AgentsProvisionProposeParamsSchema,
-  type AgentsProvisionResult,
-  AgentsProvisionResultSchema,
-  type AgentsProvisionStatusParams,
-  AgentsProvisionStatusParamsSchema,
   type AgentsUpdateParams,
   AgentsUpdateParamsSchema,
   type AgentsUpdateResult,
@@ -572,20 +560,6 @@ export const validateAgentWaitParams = lazyCompile<AgentWaitParams>(AgentWaitPar
 export const validateWakeParams = lazyCompile<WakeParams>(WakeParamsSchema);
 export const validateAgentsListParams = lazyCompile<AgentsListParams>(AgentsListParamsSchema);
 export const validateAgentsCreateParams = lazyCompile<AgentsCreateParams>(AgentsCreateParamsSchema);
-export const validateAgentsProvisionStatusParams = lazyCompile<AgentsProvisionStatusParams>(
-  AgentsProvisionStatusParamsSchema,
-);
-export const validateAgentsProvisionProposeParams = lazyCompile<AgentsProvisionProposeParams>(
-  AgentsProvisionProposeParamsSchema,
-);
-export const validateAgentsProvisionConfirmParams = lazyCompile<AgentsProvisionConfirmParams>(
-  AgentsProvisionConfirmParamsSchema,
-);
-export const validateAgentsProvisionDismissParams = lazyCompile<AgentsProvisionDismissParams>(
-  AgentsProvisionDismissParamsSchema,
-);
-export const validateAgentsProvisionOperationGetParams =
-  lazyCompile<AgentsProvisionOperationGetParams>(AgentsProvisionOperationGetParamsSchema);
 export const validateAgentsUpdateParams = lazyCompile<AgentsUpdateParams>(AgentsUpdateParamsSchema);
 export const validateAgentsDeleteParams = lazyCompile<AgentsDeleteParams>(AgentsDeleteParamsSchema);
 export const validateAgentsFilesListParams = lazyCompile<AgentsFilesListParams>(
@@ -1147,12 +1121,6 @@ export {
   AgentsFileEntrySchema,
   AgentsCreateParamsSchema,
   AgentsCreateResultSchema,
-  AgentsProvisionStatusParamsSchema,
-  AgentsProvisionProposeParamsSchema,
-  AgentsProvisionConfirmParamsSchema,
-  AgentsProvisionDismissParamsSchema,
-  AgentsProvisionOperationGetParamsSchema,
-  AgentsProvisionResultSchema,
   AgentsUpdateParamsSchema,
   AgentsUpdateResultSchema,
   AgentsDeleteParamsSchema,
@@ -1309,12 +1277,6 @@ export type {
   AgentsFileEntry,
   AgentsCreateParams,
   AgentsCreateResult,
-  AgentsProvisionStatusParams,
-  AgentsProvisionProposeParams,
-  AgentsProvisionConfirmParams,
-  AgentsProvisionDismissParams,
-  AgentsProvisionOperationGetParams,
-  AgentsProvisionResult,
   AgentsUpdateParams,
   AgentsUpdateResult,
   AgentsDeleteParams,
